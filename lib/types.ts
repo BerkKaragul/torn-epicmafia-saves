@@ -52,6 +52,7 @@ export interface SaveRow {
   timeout_at_window_start: number;
   status: "pending" | "confirmed" | "unattributed" | "not_a_save";
   member_id: number | null;
+  expected_member_id: number | null;
   attack_id: number | null;
   attack_code: string | null;
   hit_registered_at: string | null;

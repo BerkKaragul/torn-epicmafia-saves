@@ -224,6 +224,8 @@ export async function runPollCycle(): Promise<void> {
           .eq("torn_chain_id", ev.chainId)
           .is("ended_at", null);
       } else if (ev.type === "save_candidate") {
+        // whoever is up right now owns this save opportunity
+        const headAtDanger = rotationOrder(toShiftLites(activeShifts))[0] ?? null;
         await db.from("saves").upsert(
           {
             torn_chain_id: ev.chainId,
@@ -231,6 +233,7 @@ export async function runPollCycle(): Promise<void> {
             window_start: toIso(ev.windowStart),
             window_end: toIso(ev.windowEnd),
             timeout_at_window_start: ev.timeoutAtWindowStart,
+            expected_member_id: headAtDanger,
             status: "pending",
           },
           { onConflict: "torn_chain_id,chain_count", ignoreDuplicates: true },
@@ -398,7 +401,13 @@ async function attributePendingSaves(
   if (!pending?.length) return activeShifts;
 
   const sweepFromS = Math.min(...pending.map((s) => toS(s.window_start))) - 120;
-  const sweepers = activeShifts.filter((s) => usableKey(s.members, nowS));
+  // only the turn-holders responsible for a pending save need verifying
+  const expectedHeads = new Set(
+    pending.map((s) => s.expected_member_id).filter((id): id is number => id != null),
+  );
+  const sweepers = activeShifts.filter(
+    (s) => usableKey(s.members, nowS) && expectedHeads.has(s.member_id),
+  );
 
   // one attacks call per on-duty member per cycle, all in parallel; newest
   // first so a fast chainer's saving hit can't fall off the 100-row page
@@ -431,106 +440,94 @@ async function attributePendingSaves(
   );
   activeShifts = activeShifts.filter((s) => !dropped.has(s.id));
 
+  const threshold = settings.save_threshold_s;
   for (const save of pending) {
     const windowStartS = toS(save.window_start);
     const windowEndS = toS(save.window_end);
-    let matched = false;
+    const headId: number | null = save.expected_member_id ?? null;
+    const headShift = headId ? activeShifts.find((s) => s.member_id === headId) : undefined;
+    const headSwept = headId != null && attacksByMember.has(headId);
 
-    for (const shift of activeShifts) {
-      const attacks = attacksByMember.get(shift.member_id) ?? [];
-      const shiftStartS = toS(shift.started_at);
-      const hit = attacks.find(
-        (a) =>
-          // outgoing regardless of stealth: incoming always has us as defender
-          a.defender?.id !== shift.member_id &&
-          a.chain === save.chain_count &&
-          a.chain > 0 &&
-          !a.is_interrupted &&
-          a.ended >= windowStartS - 5 &&
-          a.ended <= windowEndS + 90 &&
-          // no bonus for a hit landed before the member enlisted
-          a.ended >= shiftStartS - 5,
+    // Only the turn-holder can claim this save, and only by LANDING a
+    // successful hit (chain > 0) they COMMITTED while the timer was low. We
+    // judge by `started` (energy-commit time), so a teammate's war hit
+    // resetting the timer mid-attack doesn't rob them of the credit.
+    const hit = headShift
+      ? (attacksByMember.get(headId!) ?? []).find((a) => {
+          if (a.defender?.id === headId) return false; // incoming, not ours
+          if (a.chain <= 0 || a.is_interrupted) return false; // must be a successful chain hit
+          const shiftStartS = toS(headShift.started_at);
+          if (a.ended < shiftStartS - 5) return false; // before they enlisted
+          if (a.ended < windowStartS - 5 || a.ended > windowEndS + 150) return false;
+          const remainingAtCommit = save.timeout_at_window_start - (a.started - windowStartS);
+          // they either made the resetting hit, or committed under the threshold
+          return a.chain === save.chain_count || remainingAtCommit <= threshold + 5;
+        })
+      : undefined;
+
+    if (hit) {
+      const remaining = Math.max(0, save.timeout_at_window_start - (hit.started - windowStartS));
+      const bonus = saveBonus(
+        settings.save_bonus_mode,
+        Number(settings.per_save_bonus),
+        save.chain_count,
       );
-      if (!hit) continue;
-
-      const remaining = save.timeout_at_window_start - (hit.ended - windowStartS);
-      if (remaining > settings.save_threshold_s + 5) {
-        // the resetting hit actually landed with plenty of time left
-        await db
-          .from("saves")
-          .update({
-            status: "not_a_save",
-            member_id: shift.member_id,
-            attack_id: hit.id,
-            attack_code: hit.code,
-            hit_registered_at: toIso(hit.ended),
-            remaining_at_hit_s: remaining,
-          })
-          .eq("id", save.id)
-          .eq("status", "pending"); // never clobber an admin's manual call
-      } else {
-        const bonus = saveBonus(
-          settings.save_bonus_mode,
-          Number(settings.per_save_bonus),
-          save.chain_count,
-        );
-        const { data: confirmedRow } = await db
-          .from("saves")
-          .update({
-            status: "confirmed",
-            member_id: shift.member_id,
-            attack_id: hit.id,
-            attack_code: hit.code,
-            hit_registered_at: toIso(hit.ended),
-            remaining_at_hit_s: remaining,
-            bonus_snapshot: bonus,
-          })
-          .eq("id", save.id)
-          .eq("status", "pending") // never clobber an admin's manual call
-          .is("payout_line_id", null)
-          .select("id")
-          .maybeSingle();
-        if (confirmedRow) {
-          await db.from("shifts").update({ last_save_at: toIso(hit.ended) }).eq("id", shift.id);
-          shift.last_save_at = toIso(hit.ended);
-          const shown = Math.max(0, Math.round(remaining));
-          await dispatch(db, [shift.member_id], {
-            type: "save_confirmed",
-            title: "Save confirmed ✅",
-            body: `Chain hit #${save.chain_count} with ${shown}s left — bonus $${bonus.toLocaleString()}`,
-            url: "/duty",
-            dedupKey: `save_confirmed:${save.id}`,
-          });
-        }
+      const { data: confirmedRow } = await db
+        .from("saves")
+        .update({
+          status: "confirmed",
+          member_id: headId,
+          attack_id: hit.id,
+          attack_code: hit.code,
+          hit_registered_at: toIso(hit.ended),
+          remaining_at_hit_s: remaining,
+          bonus_snapshot: bonus,
+        })
+        .eq("id", save.id)
+        .eq("status", "pending") // never clobber an admin's manual call
+        .is("payout_line_id", null)
+        .select("id")
+        .maybeSingle();
+      if (confirmedRow && headShift) {
+        await db.from("shifts").update({ last_save_at: toIso(hit.ended) }).eq("id", headShift.id);
+        headShift.last_save_at = toIso(hit.ended);
+        await dispatch(db, [headId!], {
+          type: "save_confirmed",
+          title: "Save confirmed ✅",
+          body: `Chain hit #${save.chain_count} with ${Math.round(remaining)}s left — bonus $${bonus.toLocaleString()}`,
+          url: "/duty",
+          dedupKey: `save_confirmed:${save.id}`,
+        });
       }
-      matched = true;
-      break;
+      continue;
     }
 
-    if (!matched) {
-      // only burn an attempt when at least one sweep actually returned data
-      if (attacksByMember.size === 0) continue;
-      const attempts = (save.attempts ?? 0) + 1;
-      if (attempts >= 20) {
-        // ~5 minutes of real sweeps: someone outside the saver roster made the hit
-        await db
-          .from("saves")
-          .update({ status: "unattributed", attempts })
-          .eq("id", save.id)
-          .eq("status", "pending");
-        const head = rotationOrder(toShiftLites(activeShifts))[0];
-        if (head) {
-          await dispatch(db, [head], {
-            type: "scooped",
-            title: "Save done by someone else",
-            body: `Chain hit #${save.chain_count} was saved by a non-enlisted member. Your turn continues.`,
-            url: "/",
-            dedupKey: `scooped:${save.id}`,
-          });
-        }
-      } else {
-        await db.from("saves").update({ attempts }).eq("id", save.id).eq("status", "pending");
+    // No qualifying hit yet. If the turn-holder is on duty but we haven't
+    // fetched their log this cycle (rate-limited), wait rather than penalize.
+    if (headShift && !headSwept) continue;
+
+    // The turn-holder didn't save it (a teammate's hit / war hit reset the
+    // timer, or they only made a losing attack). Retry a while — they may be
+    // mid-attack or holding — then rule it a bystander bail: NOBODY is
+    // credited and the turn-holder KEEPS their turn (rotation not advanced).
+    const attempts = (save.attempts ?? 0) + 1;
+    if (attempts >= 20) {
+      await db
+        .from("saves")
+        .update({ status: "unattributed", attempts })
+        .eq("id", save.id)
+        .eq("status", "pending");
+      if (headId) {
+        await dispatch(db, [headId], {
+          type: "scooped",
+          title: "Chain bailed by someone else",
+          body: `Hit #${save.chain_count} was reset by another member / a war hit — you didn't land a save, so it's still your turn.`,
+          url: "/",
+          dedupKey: `scooped:${save.id}`,
+        });
       }
+    } else {
+      await db.from("saves").update({ attempts }).eq("id", save.id).eq("status", "pending");
     }
   }
   return activeShifts;

@@ -7,8 +7,13 @@ export async function GET() {
   const member = await sessionMember();
   if (!member) return unauthorized();
 
-  const [{ data: activeShift }, { data: settings }, { data: myShifts }, { data: mySaves }] =
-    await Promise.all([
+  const [
+    { data: activeShift },
+    { data: settings },
+    { data: myShifts },
+    { data: mySaves },
+    { count: missedTurns },
+  ] = await Promise.all([
       db()
         .from("shifts")
         .select("*")
@@ -32,6 +37,10 @@ export async function GET() {
         .eq("status", "confirmed")
         .is("payout_line_id", null)
         .returns<SaveRow[]>(),
+      db()
+        .from("missed_turns")
+        .select("id", { count: "exact", head: true })
+        .eq("member_id", member.torn_id),
     ]);
 
   // unpaid totals: closed shifts + the live one, valued at their snapshotted rates
@@ -68,5 +77,6 @@ export async function GET() {
       save_count: (mySaves ?? []).length,
       saves_amount: Math.round(savesAmount),
     },
+    missed_turns: missedTurns ?? 0,
   });
 }

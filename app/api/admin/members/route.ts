@@ -7,16 +7,25 @@ export async function GET() {
   if (!member) return unauthorized();
   if (!member.is_admin) return forbidden();
 
-  const [{ data: members }, { data: activeShifts }] = await Promise.all([
+  const [{ data: members }, { data: activeShifts }, { data: missed }] = await Promise.all([
     db()
       .from("members")
       .select("torn_id, name, key_access_level, key_valid, is_admin, admin_source, last_login_at")
       .order("name"),
     db().from("shifts").select("member_id").is("ended_at", null),
+    db().from("missed_turns").select("member_id"),
   ]);
   const onDuty = new Set((activeShifts ?? []).map((s: { member_id: number }) => s.member_id));
+  const missedCounts = new Map<number, number>();
+  for (const row of (missed ?? []) as { member_id: number }[]) {
+    missedCounts.set(row.member_id, (missedCounts.get(row.member_id) ?? 0) + 1);
+  }
   return NextResponse.json({
-    members: (members ?? []).map((m) => ({ ...m, on_duty: onDuty.has(m.torn_id) })),
+    members: (members ?? []).map((m) => ({
+      ...m,
+      on_duty: onDuty.has(m.torn_id),
+      missed_turns: missedCounts.get(m.torn_id) ?? 0,
+    })),
   });
 }
 

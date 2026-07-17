@@ -18,7 +18,9 @@ export interface NotifyEvent {
     | "scooped"
     | "shift_ending_soon"
     | "shift_end"
-    | "save_confirmed";
+    | "save_confirmed"
+    | "missed_turn"
+    | "chain_dropped";
   title: string;
   body: string;
   url?: string;

@@ -14,6 +14,7 @@ interface Me {
   } | null;
   rates: { hourly_rate: number; per_save_bonus: number } | null;
   unpaid: { duty_seconds: number; hours_amount: number; save_count: number; saves_amount: number };
+  missed_turns: number;
 }
 
 export function DutyPanel() {
@@ -192,6 +193,14 @@ export function DutyPanel() {
           <div>
             <p className="text-2xl font-bold tabular-nums">{fmtMoney(me.unpaid.saves_amount)}</p>
             <p className="text-xs text-neutral-500">for saves</p>
+          </div>
+          <div>
+            <p
+              className={`text-2xl font-bold tabular-nums ${me.missed_turns > 0 ? "text-red-400" : ""}`}
+            >
+              {me.missed_turns}
+            </p>
+            <p className="text-xs text-neutral-500">chains lost on your turn</p>
           </div>
         </div>
       </section>

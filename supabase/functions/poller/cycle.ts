@@ -2,7 +2,7 @@
 // saves via on-duty members' own attack logs, manage shifts, alert, poke.
 
 import { createClient, type SupabaseClient } from "npm:@supabase/supabase-js@2";
-import { detect, type ChainObservation } from "../_shared/logic/detect.ts";
+import { detect, type ChainEvent, type ChainObservation } from "../_shared/logic/detect.ts";
 import { rotationOrder, type ShiftLite } from "../_shared/logic/rotation.ts";
 import { decryptApiKey } from "../_shared/lib/crypto.ts";
 import {
@@ -240,6 +240,15 @@ export async function runPollCycle(): Promise<void> {
     // ── shift housekeeping (planned durations) ───────────────────────────
     activeShifts = await housekeepShifts(db, activeShifts, nowS);
 
+    // ── an established chain died: blame the turn-holder, stop the pay ───
+    const droppedChain = events.find(
+      (e): e is Extract<ChainEvent, { type: "chain_ended" }> =>
+        e.type === "chain_ended" && e.reason === "dropped" && e.finalCount >= 10,
+    );
+    if (droppedChain && activeShifts.length > 0) {
+      activeShifts = await handleChainDropped(db, activeShifts, droppedChain);
+    }
+
     // ── periodic roster / leadership refresh ─────────────────────────────
     const rosterAge = state.roster_refreshed_at ? nowS - toS(state.roster_refreshed_at) : Infinity;
     let rosterRefreshedAt = state.roster_refreshed_at;
@@ -462,6 +471,52 @@ async function attributePendingSaves(
   return activeShifts;
 }
 
+/**
+ * A 10+ chain dropped with savers on duty. The rotation head "missed their
+ * turn" (tallied in missed_turns), and availability pay stops for everyone:
+ * all active shifts end now with reason chain_dropped — paid up to this
+ * moment, nothing after. Members re-enlist when the next chain starts.
+ */
+async function handleChainDropped(
+  db: SupabaseClient,
+  activeShifts: ActiveShiftRow[],
+  ev: { chainId: number; finalCount: number },
+): Promise<ActiveShiftRow[]> {
+  const head = rotationOrder(toShiftLites(activeShifts))[0] ?? null;
+  if (head) {
+    await db.from("missed_turns").insert({
+      torn_chain_id: ev.chainId,
+      chain_count_at_drop: ev.finalCount,
+      member_id: head,
+    });
+  }
+  await db
+    .from("shifts")
+    .update({ ended_at: new Date().toISOString(), end_reason: "chain_dropped" })
+    .is("ended_at", null);
+
+  if (head) {
+    await dispatch(db, [head], {
+      type: "missed_turn",
+      title: "💀 Chain lost on your turn",
+      body: `The ${ev.finalCount.toLocaleString()}-chain died while you were up. It's on your record. All saver shifts have ended.`,
+      url: "/duty",
+      dedupKey: `missed_turn:${ev.chainId}`,
+    });
+  }
+  const others = activeShifts.map((s) => s.member_id).filter((id) => id !== head);
+  if (others.length) {
+    await dispatch(db, others, {
+      type: "chain_dropped",
+      title: "Chain dropped — shifts ended",
+      body: `The ${ev.finalCount.toLocaleString()}-chain died. Availability pay stopped; re-enlist when the next chain starts.`,
+      url: "/duty",
+      dedupKey: `chain_dropped:${ev.chainId}`,
+    });
+  }
+  return [];
+}
+
 async function housekeepShifts(
   db: SupabaseClient,
   activeShifts: ActiveShiftRow[],
@@ -520,7 +575,7 @@ async function alertDanger(
     type: "your_turn",
     title: critical ? `🚨 LAST CHANCE — ${mmss} LEFT` : "🚨 YOUR TURN — SAVE NOW",
     body: `Chain timer at ${mmss}. Hit anyone and HOLD the result page.`,
-    url: "https://www.torn.com/loader.php?sid=attack",
+    url: "https://www.torn.com/page.php?sid=list&type=targets",
     dedupKey: `${episodeKey}:head`,
   });
   const others = order.slice(1);

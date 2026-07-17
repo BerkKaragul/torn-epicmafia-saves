@@ -19,6 +19,7 @@ interface AdminMember {
   admin_source: "auto" | "granted" | null;
   last_login_at: string | null;
   on_duty: boolean;
+  missed_turns: number;
 }
 
 interface AdminSave {
@@ -220,6 +221,7 @@ export function AdminPanel() {
                 <th className="py-1.5 pr-3">Member</th>
                 <th className="py-1.5 pr-3">Key</th>
                 <th className="py-1.5 pr-3">Status</th>
+                <th className="py-1.5 pr-3">Missed</th>
                 <th className="py-1.5 pr-3">Admin</th>
                 <th className="py-1.5" />
               </tr>
@@ -243,6 +245,12 @@ export function AdminPanel() {
                     ) : (
                       <span className="text-neutral-600">—</span>
                     )}
+                  </td>
+                  <td
+                    className={`py-2 pr-3 tabular-nums ${m.missed_turns > 0 ? "font-semibold text-red-400" : "text-neutral-600"}`}
+                    title="chains lost while it was their turn"
+                  >
+                    {m.missed_turns}
                   </td>
                   <td className="py-2 pr-3">
                     {m.admin_source === "auto" ? (

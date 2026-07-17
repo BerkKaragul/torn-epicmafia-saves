@@ -1,0 +1,10 @@
+@import "tailwindcss";
+
+:root {
+  --danger-flash: 0 0% 100%;
+}
+
+html,
+body {
+  height: 100%;
+}

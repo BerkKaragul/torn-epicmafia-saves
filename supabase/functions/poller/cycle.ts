@@ -1,5 +1,5 @@
 // One poll cycle: observe the chain, run the detector, attribute pending
-// saves via on-duty members' own attack logs, manage shifts, alert, broadcast.
+// saves via on-duty members' own attack logs, manage shifts, alert, poke.
 
 import { createClient, type SupabaseClient } from "npm:@supabase/supabase-js@2";
 import { detect, type ChainObservation } from "../_shared/logic/detect.ts";
@@ -7,6 +7,7 @@ import { rotationOrder, type ShiftLite } from "../_shared/logic/rotation.ts";
 import { decryptApiKey } from "../_shared/lib/crypto.ts";
 import {
   isInvalidKeyError,
+  isRateLimitError,
   makeTornClient,
   type TornClient,
 } from "../_shared/lib/torn.ts";
@@ -21,6 +22,7 @@ interface MemberKeyRow {
   api_key_ct: string | null;
   api_key_iv: string | null;
   key_valid: boolean;
+  rate_limited_until: string | null;
 }
 
 interface ActiveShiftRow {
@@ -31,6 +33,8 @@ interface ActiveShiftRow {
   last_save_at: string | null;
   members: MemberKeyRow;
 }
+
+const MEMBER_KEY_COLS = "torn_id, name, api_key_ct, api_key_iv, key_valid, rate_limited_until";
 
 function sb(): SupabaseClient {
   return createClient(
@@ -49,8 +53,24 @@ async function tornFor(member: MemberKeyRow): Promise<TornClient> {
   return makeTornClient({ apiKey: key, baseUrl: Deno.env.get("TORN_API_BASE") || undefined });
 }
 
-/** v2 spec says cooldown may be a "timestamp until"; v1 tooling saw seconds. */
-function normalizeCooldownS(raw: number, nowS: number): number {
+function usableKey(m: MemberKeyRow, nowS: number): boolean {
+  return (
+    m.key_valid &&
+    !!m.api_key_ct &&
+    (!m.rate_limited_until || toS(m.rate_limited_until) <= nowS)
+  );
+}
+
+/** Torn error 5 = the key OWNER is over 100 req/min (their other tools count too). */
+async function backoffMember(db: SupabaseClient, tornId: number): Promise<void> {
+  await db
+    .from("members")
+    .update({ rate_limited_until: new Date(Date.now() + 90_000).toISOString() })
+    .eq("torn_id", tornId);
+}
+
+/** v2 spec ambiguity: these fields may be "seconds remaining" or an epoch "until". */
+function normalizeRemainingS(raw: number, nowS: number): number {
   if (raw > 1_000_000_000) return Math.max(0, raw - nowS);
   return Math.max(0, raw);
 }
@@ -59,14 +79,46 @@ export async function runPollCycle(): Promise<void> {
   const db = sb();
   const nowS = Math.floor(Date.now() / 1000);
 
-  const { data: settings } = await db.from("settings").select("*").eq("id", 1).single();
-  if (!settings) return;
+  const [{ data: settings }, { data: state0 }] = await Promise.all([
+    db.from("settings").select("*").eq("id", 1).single(),
+    db.from("poller_state").select("*").eq("id", 1).single(),
+  ]);
+  if (!settings || !state0) return;
 
-  // Overlap guard: claim the singleton row unless a cycle claimed it <55s ago.
+  const prevObs: ChainObservation | null = state0.last_poll_at
+    ? {
+        polledAt: toS(state0.last_poll_at),
+        chainId: state0.last_chain_id ?? 0,
+        current: state0.last_current ?? 0,
+        max: state0.last_max ?? 0,
+        timeoutS: state0.last_timeout_s ?? 0,
+        cooldownS: state0.last_cooldown_s ?? 0,
+      }
+    : null;
+  const prevActive =
+    prevObs !== null && prevObs.chainId > 0 && prevObs.current > 0 && prevObs.cooldownS === 0;
+
+  // ── cadence pre-check: cheap reads only, no lock claim, no writes ──────
+  const [{ count: activeShiftCount }, { count: pendingCount }] = await Promise.all([
+    db.from("shifts").select("id", { count: "exact", head: true }).is("ended_at", null),
+    db
+      .from("saves")
+      .select("id", { count: "exact", head: true })
+      .eq("status", "pending"),
+  ]);
+  const busy = prevActive || (activeShiftCount ?? 0) > 0 || (pendingCount ?? 0) > 0;
+  const interval = busy
+    ? Math.max(15, settings.poll_interval_s)
+    : Math.max(15, settings.idle_poll_interval_s);
+  const sinceLast = prevObs ? nowS - prevObs.polledAt : Infinity;
+  if (sinceLast < interval - 3) return; // -3 absorbs cron jitter
+
+  // ── overlap lock with ownership token (release only what we claimed) ──
+  const token = new Date().toISOString();
   const staleCutoff = new Date(Date.now() - 55_000).toISOString();
   const { data: lockRows } = await db
     .from("poller_state")
-    .update({ running_since: new Date().toISOString() })
+    .update({ running_since: token })
     .eq("id", 1)
     .or(`running_since.is.null,running_since.lt.${staleCutoff}`)
     .select("*");
@@ -76,38 +128,13 @@ export async function runPollCycle(): Promise<void> {
   try {
     const { data: activeShiftsRaw } = await db
       .from("shifts")
-      .select(
-        "id, member_id, started_at, planned_minutes, last_save_at, members!inner(torn_id, name, api_key_ct, api_key_iv, key_valid)",
-      )
+      .select(`id, member_id, started_at, planned_minutes, last_save_at, members!inner(${MEMBER_KEY_COLS})`)
       .is("ended_at", null)
       .returns<ActiveShiftRow[]>();
     let activeShifts = activeShiftsRaw ?? [];
 
-    const prevObs: ChainObservation | null = state.last_poll_at
-      ? {
-          polledAt: toS(state.last_poll_at),
-          chainId: state.last_chain_id ?? 0,
-          current: state.last_current ?? 0,
-          max: 0,
-          timeoutS: state.last_timeout_s ?? 0,
-          cooldownS: state.last_cooldown_s ?? 0,
-        }
-      : null;
-
-    // Adaptive cadence: with no chain, nobody on duty and nothing pending,
-    // only actually hit Torn every idle_poll_interval_s.
-    const { count: pendingCount } = await db
-      .from("saves")
-      .select("id", { count: "exact", head: true })
-      .eq("status", "pending");
-    const prevActive = prevObs !== null && prevObs.chainId > 0 && prevObs.current > 0;
-    const idle = !prevActive && activeShifts.length === 0 && (pendingCount ?? 0) === 0;
-    if (idle && prevObs && nowS - prevObs.polledAt < settings.idle_poll_interval_s) {
-      return;
-    }
-
-    // ── resolve a key to poll the faction chain with ──────────────────────
-    const pollerMember = await pickPollerMember(db, settings.poller_member_id, activeShifts);
+    // ── resolve a key and observe the chain ──────────────────────────────
+    const pollerMember = await pickPollerMember(db, settings.poller_member_id, activeShifts, nowS);
     if (!pollerMember) {
       console.warn("no usable API key to poll with — nobody has logged in yet?");
       return;
@@ -124,6 +151,8 @@ export async function runPollCycle(): Promise<void> {
         .eq("id", 1);
       if (isInvalidKeyError(e)) {
         await db.from("members").update({ key_valid: false }).eq("torn_id", pollerMember.torn_id);
+      } else if (isRateLimitError(e)) {
+        await backoffMember(db, pollerMember.torn_id);
       }
       console.error("chain poll failed:", e);
       return;
@@ -134,18 +163,22 @@ export async function runPollCycle(): Promise<void> {
       chainId: chain.id ?? 0,
       current: chain.current ?? 0,
       max: chain.max ?? 0,
-      timeoutS: chain.timeout ?? 0,
-      cooldownS: normalizeCooldownS(chain.cooldown ?? 0, nowS),
+      timeoutS: normalizeRemainingS(chain.timeout ?? 0, nowS),
+      cooldownS: normalizeRemainingS(chain.cooldown ?? 0, nowS),
     };
+    const obsActive = obs.chainId > 0 && obs.current > 0 && obs.cooldownS === 0;
 
-    await db.from("chain_polls").insert({
-      polled_at: toIso(nowS),
-      torn_chain_id: obs.chainId || null,
-      current: obs.current,
-      timeout_s: obs.timeoutS,
-      cooldown_s: obs.cooldownS,
-      raw: chain,
-    });
+    // observation log: skip pure idle→idle rows; keep raw only while a chain exists
+    if (obs.chainId > 0 || obs.cooldownS > 0 || prevActive) {
+      await db.from("chain_polls").insert({
+        polled_at: toIso(nowS),
+        torn_chain_id: obs.chainId || null,
+        current: obs.current,
+        timeout_s: obs.timeoutS,
+        cooldown_s: obs.cooldownS,
+        raw: obs.chainId > 0 ? chain : null,
+      });
+    }
 
     // ── run the detector and persist its events ──────────────────────────
     const events = detect(prevObs, obs, {
@@ -154,7 +187,7 @@ export async function runPollCycle(): Promise<void> {
       slackS: 5,
     });
 
-    if (obs.chainId > 0 && obs.current > 0) {
+    if (obsActive) {
       await db.from("chains").upsert(
         {
           torn_chain_id: obs.chainId,
@@ -174,7 +207,7 @@ export async function runPollCycle(): Promise<void> {
       if (ev.type === "chain_ended") {
         await db
           .from("chains")
-          .update({ ended_at: toIso(nowS), end_reason: ev.reason })
+          .update({ ended_at: toIso(nowS), end_reason: ev.reason, max_current: ev.finalCount })
           .eq("torn_chain_id", ev.chainId)
           .is("ended_at", null);
       } else if (ev.type === "save_candidate") {
@@ -189,14 +222,20 @@ export async function runPollCycle(): Promise<void> {
           },
           { onConflict: "torn_chain_id,chain_count", ignoreDuplicates: true },
         );
-      } else if (ev.type === "timer_low" && ev.episodeKey !== dangerEpisodeKey) {
-        dangerEpisodeKey = ev.episodeKey;
-        await alertDanger(db, activeShifts, ev.timeoutS, ev.episodeKey);
+      } else if (ev.type === "timer_low") {
+        // two alert tiers per hit-episode: first crossing the threshold, and
+        // a last-chance escalation at ≤45s if nobody has hit yet
+        const tier = ev.timeoutS <= 45 ? "critical" : "low";
+        const fullKey = `${ev.episodeKey}:${tier}`;
+        if (fullKey !== dangerEpisodeKey) {
+          dangerEpisodeKey = fullKey;
+          await alertDanger(db, activeShifts, ev.timeoutS, fullKey, tier === "critical");
+        }
       }
     }
 
     // ── attribute pending saves via on-duty members' own attack logs ─────
-    activeShifts = await attributePendingSaves(db, activeShifts, settings);
+    activeShifts = await attributePendingSaves(db, activeShifts, settings, nowS);
 
     // ── shift housekeeping (planned durations) ───────────────────────────
     activeShifts = await housekeepShifts(db, activeShifts, nowS);
@@ -209,24 +248,40 @@ export async function runPollCycle(): Promise<void> {
       rosterRefreshedAt = toIso(nowS);
     }
 
-    // ── persist state & broadcast ────────────────────────────────────────
+    // ── poke clients when something changed (they re-fetch /api/state) ───
+    const order = rotationOrder(toShiftLites(activeShifts));
+    const danger = obsActive && obs.timeoutS <= settings.alert_threshold_s;
+    const fingerprint = `${obs.chainId}:${obs.current}:${obs.cooldownS > 0}:${danger}:${order.join(",")}`;
+    const lastBroadcastS = state.last_broadcast_at ? toS(state.last_broadcast_at) : 0;
+    const shouldPoke = fingerprint !== state.last_broadcast_fingerprint || nowS - lastBroadcastS >= 60;
+    if (shouldPoke) await pokeClients();
+
+    // ── persist state ────────────────────────────────────────────────────
     await db
       .from("poller_state")
       .update({
         last_poll_at: toIso(nowS),
         last_chain_id: obs.chainId || null,
         last_current: obs.current,
+        last_max: obs.max,
         last_timeout_s: obs.timeoutS,
         last_cooldown_s: obs.cooldownS,
         consecutive_errors: 0,
         danger_episode_key: dangerEpisodeKey,
         roster_refreshed_at: rosterRefreshedAt,
+        ...(shouldPoke
+          ? { last_broadcast_fingerprint: fingerprint, last_broadcast_at: toIso(nowS) }
+          : {}),
       })
       .eq("id", 1);
-
-    await broadcastState(db, obs, activeShifts, settings);
   } finally {
-    await db.from("poller_state").update({ running_since: null }).eq("id", 1);
+    // release only if we still own the lease — a slow cycle must not clear
+    // a newer cycle's claim
+    await db
+      .from("poller_state")
+      .update({ running_since: null })
+      .eq("id", 1)
+      .eq("running_since", token);
   }
 }
 
@@ -234,34 +289,37 @@ async function pickPollerMember(
   db: SupabaseClient,
   preferredId: number | null,
   activeShifts: ActiveShiftRow[],
+  nowS: number,
 ): Promise<MemberKeyRow | null> {
   if (preferredId) {
     const { data } = await db
       .from("members")
-      .select("torn_id, name, api_key_ct, api_key_iv, key_valid")
+      .select(MEMBER_KEY_COLS)
       .eq("torn_id", preferredId)
       .eq("key_valid", true)
       .not("api_key_ct", "is", null)
       .maybeSingle<MemberKeyRow>();
-    if (data) return data;
+    if (data && usableKey(data, nowS)) return data;
   }
-  const onDuty = activeShifts.find((s) => s.members.key_valid && s.members.api_key_ct);
+  const onDuty = activeShifts.find((s) => usableKey(s.members, nowS));
   if (onDuty) return onDuty.members;
-  const { data: anyMember } = await db
+  const { data: fallback } = await db
     .from("members")
-    .select("torn_id, name, api_key_ct, api_key_iv, key_valid")
+    .select(MEMBER_KEY_COLS)
     .eq("key_valid", true)
     .not("api_key_ct", "is", null)
+    .or(`rate_limited_until.is.null,rate_limited_until.lt.${new Date().toISOString()}`)
     .order("last_login_at", { ascending: false })
     .limit(1)
     .maybeSingle<MemberKeyRow>();
-  return anyMember ?? null;
+  return fallback ?? null;
 }
 
 async function attributePendingSaves(
   db: SupabaseClient,
   activeShifts: ActiveShiftRow[],
   settings: Record<string, number>,
+  nowS: number,
 ): Promise<ActiveShiftRow[]> {
   const { data: pending } = await db
     .from("saves")
@@ -271,30 +329,38 @@ async function attributePendingSaves(
   if (!pending?.length) return activeShifts;
 
   const sweepFromS = Math.min(...pending.map((s) => toS(s.window_start))) - 120;
-  const sweepers = activeShifts.filter((s) => s.members.key_valid && s.members.api_key_ct);
+  const sweepers = activeShifts.filter((s) => usableKey(s.members, nowS));
 
-  // one attacks call per on-duty member per cycle, covering every pending save
+  // one attacks call per on-duty member per cycle, all in parallel; newest
+  // first so a fast chainer's saving hit can't fall off the 100-row page
   const attacksByMember = new Map<number, Awaited<ReturnType<TornClient["userAttacks"]>>>();
-  for (const shift of sweepers) {
-    try {
-      const torn = await tornFor(shift.members);
-      attacksByMember.set(
-        shift.member_id,
-        await torn.userAttacks({ from: sweepFromS, sort: "asc", limit: 100 }),
-      );
-    } catch (e) {
-      if (isInvalidKeyError(e)) {
-        await db.from("members").update({ key_valid: false }).eq("torn_id", shift.member_id);
-        await db
-          .from("shifts")
-          .update({ ended_at: new Date().toISOString(), end_reason: "key_invalid" })
-          .eq("id", shift.id);
-        activeShifts = activeShifts.filter((s) => s.id !== shift.id);
-      } else {
-        console.error(`attack sweep failed for ${shift.member_id}:`, e);
+  const dropped = new Set<string>();
+  await Promise.all(
+    sweepers.map(async (shift) => {
+      try {
+        const torn = await tornFor(shift.members);
+        attacksByMember.set(
+          shift.member_id,
+          await torn.userAttacks({ from: sweepFromS, sort: "desc", limit: 100 }),
+        );
+      } catch (e) {
+        if (isInvalidKeyError(e)) {
+          await db.from("members").update({ key_valid: false }).eq("torn_id", shift.member_id);
+          await db
+            .from("shifts")
+            .update({ ended_at: new Date().toISOString(), end_reason: "key_invalid" })
+            .eq("id", shift.id)
+            .is("ended_at", null);
+          dropped.add(shift.id);
+        } else if (isRateLimitError(e)) {
+          await backoffMember(db, shift.member_id);
+        } else {
+          console.error(`attack sweep failed for ${shift.member_id}:`, e);
+        }
       }
-    }
-  }
+    }),
+  );
+  activeShifts = activeShifts.filter((s) => !dropped.has(s.id));
 
   for (const save of pending) {
     const windowStartS = toS(save.window_start);
@@ -303,14 +369,18 @@ async function attributePendingSaves(
 
     for (const shift of activeShifts) {
       const attacks = attacksByMember.get(shift.member_id) ?? [];
+      const shiftStartS = toS(shift.started_at);
       const hit = attacks.find(
         (a) =>
-          a.attacker?.id === shift.member_id &&
+          // outgoing regardless of stealth: incoming always has us as defender
+          a.defender?.id !== shift.member_id &&
           a.chain === save.chain_count &&
           a.chain > 0 &&
           !a.is_interrupted &&
           a.ended >= windowStartS - 5 &&
-          a.ended <= windowEndS + 90,
+          a.ended <= windowEndS + 90 &&
+          // no bonus for a hit landed before the member enlisted
+          a.ended >= shiftStartS - 5,
       );
       if (!hit) continue;
 
@@ -327,9 +397,10 @@ async function attributePendingSaves(
             hit_registered_at: toIso(hit.ended),
             remaining_at_hit_s: remaining,
           })
-          .eq("id", save.id);
+          .eq("id", save.id)
+          .eq("status", "pending"); // never clobber an admin's manual call
       } else {
-        await db
+        const { data: confirmedRow } = await db
           .from("saves")
           .update({
             status: "confirmed",
@@ -340,31 +411,39 @@ async function attributePendingSaves(
             remaining_at_hit_s: remaining,
             bonus_snapshot: settings.per_save_bonus,
           })
-          .eq("id", save.id);
-        await db
-          .from("shifts")
-          .update({ last_save_at: toIso(hit.ended) })
-          .eq("id", shift.id);
-        shift.last_save_at = toIso(hit.ended);
-        const shown = Math.max(0, Math.round(remaining));
-        await dispatch(db, [shift.member_id], {
-          type: "save_confirmed",
-          title: "Save confirmed ✅",
-          body: `Chain hit #${save.chain_count} with ${shown}s left — bonus $${Number(settings.per_save_bonus).toLocaleString()}`,
-          url: "/duty",
-          dedupKey: `save_confirmed:${save.id}`,
-          dedupWindowS: 3600,
-        });
+          .eq("id", save.id)
+          .eq("status", "pending") // never clobber an admin's manual call
+          .is("payout_line_id", null)
+          .select("id")
+          .maybeSingle();
+        if (confirmedRow) {
+          await db.from("shifts").update({ last_save_at: toIso(hit.ended) }).eq("id", shift.id);
+          shift.last_save_at = toIso(hit.ended);
+          const shown = Math.max(0, Math.round(remaining));
+          await dispatch(db, [shift.member_id], {
+            type: "save_confirmed",
+            title: "Save confirmed ✅",
+            body: `Chain hit #${save.chain_count} with ${shown}s left — bonus $${Number(settings.per_save_bonus).toLocaleString()}`,
+            url: "/duty",
+            dedupKey: `save_confirmed:${save.id}`,
+          });
+        }
       }
       matched = true;
       break;
     }
 
     if (!matched) {
+      // only burn an attempt when at least one sweep actually returned data
+      if (attacksByMember.size === 0) continue;
       const attempts = (save.attempts ?? 0) + 1;
-      if (attempts >= 12) {
-        // ~3 minutes of sweeps: someone outside the saver roster made the hit
-        await db.from("saves").update({ status: "unattributed", attempts }).eq("id", save.id);
+      if (attempts >= 20) {
+        // ~5 minutes of real sweeps: someone outside the saver roster made the hit
+        await db
+          .from("saves")
+          .update({ status: "unattributed", attempts })
+          .eq("id", save.id)
+          .eq("status", "pending");
         const head = rotationOrder(toShiftLites(activeShifts))[0];
         if (head) {
           await dispatch(db, [head], {
@@ -373,11 +452,10 @@ async function attributePendingSaves(
             body: `Chain hit #${save.chain_count} was saved by a non-enlisted member. Your turn continues.`,
             url: "/",
             dedupKey: `scooped:${save.id}`,
-            dedupWindowS: 3600,
           });
         }
       } else {
-        await db.from("saves").update({ attempts }).eq("id", save.id);
+        await db.from("saves").update({ attempts }).eq("id", save.id).eq("status", "pending");
       }
     }
   }
@@ -408,7 +486,6 @@ async function housekeepShifts(
         body: "Your planned saver shift is over. Thanks! Start a new one any time.",
         url: "/duty",
         dedupKey: `shift_ended:${shift.id}`,
-        dedupWindowS: 3600,
       });
     } else {
       if (endS - nowS <= 600) {
@@ -418,7 +495,6 @@ async function housekeepShifts(
           body: "Your saver shift ends soon — open the duty page to extend it.",
           url: "/duty",
           dedupKey: `shift_warn:${shift.id}`,
-          dedupWindowS: 3600,
         });
       }
       remaining.push(shift);
@@ -432,17 +508,17 @@ async function alertDanger(
   activeShifts: ActiveShiftRow[],
   timeoutS: number,
   episodeKey: string,
+  critical: boolean,
 ): Promise<void> {
-  const lites = toShiftLites(activeShifts);
-  const order = rotationOrder(lites);
+  const order = rotationOrder(toShiftLites(activeShifts));
   const head = order[0];
   if (!head) return;
-  const mmss = `${Math.floor(timeoutS / 60)}:${String(timeoutS % 60).padStart(2, "0")}`;
+  const mmss = `${Math.floor(timeoutS / 60)}:${String(Math.floor(timeoutS % 60)).padStart(2, "0")}`;
   const headName = activeShifts.find((s) => s.member_id === head)?.members.name ?? "?";
 
   await dispatch(db, [head], {
     type: "your_turn",
-    title: "🚨 YOUR TURN — SAVE NOW",
+    title: critical ? `🚨 LAST CHANCE — ${mmss} LEFT` : "🚨 YOUR TURN — SAVE NOW",
     body: `Chain timer at ${mmss}. Hit anyone and HOLD the result page.`,
     url: "https://www.torn.com/loader.php?sid=attack",
     dedupKey: `${episodeKey}:head`,
@@ -451,8 +527,12 @@ async function alertDanger(
   if (others.length) {
     await dispatch(db, others, {
       type: "timer_low",
-      title: `Chain timer low — ${headName}'s turn`,
-      body: `Timer at ${mmss}. ${headName} is up; be ready to back them up.`,
+      title: critical
+        ? `🚨 Chain about to drop — ${mmss}`
+        : `Chain timer low — ${headName}'s turn`,
+      body: critical
+        ? `Timer at ${mmss} and no hit yet. Anyone save it NOW.`
+        : `Timer at ${mmss}. ${headName} is up; be ready to back them up.`,
       url: "/",
       dedupKey: `${episodeKey}:others`,
     });
@@ -462,11 +542,18 @@ async function alertDanger(
 async function refreshRoster(
   db: SupabaseClient,
   pollerMember: MemberKeyRow,
-  settings: Record<string, number | null>,
+  settings: { faction_id: number },
 ): Promise<void> {
   try {
     const torn = await tornFor(pollerMember);
     const [basic, roster] = await Promise.all([torn.factionBasic(), torn.factionMembers()]);
+
+    if (basic.id !== settings.faction_id) {
+      console.error(
+        `poller key belongs to faction ${basic.id}, app tracks ${settings.faction_id} — skipping roster sync`,
+      );
+      return;
+    }
 
     await db
       .from("settings")
@@ -515,48 +602,12 @@ function toShiftLites(shifts: ActiveShiftRow[]): ShiftLite[] {
   }));
 }
 
-async function broadcastState(
-  db: SupabaseClient,
-  obs: ChainObservation,
-  activeShifts: ActiveShiftRow[],
-  settings: Record<string, number>,
-): Promise<void> {
-  const lites = toShiftLites(activeShifts);
-  const order = rotationOrder(lites);
-  const { data: lastSave } = await db
-    .from("saves")
-    .select("chain_count, member_id, remaining_at_hit_s, hit_registered_at, status")
-    .in("status", ["confirmed", "unattributed"])
-    .order("detected_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
-  const names = new Map(activeShifts.map((s) => [s.member_id, s.members.name]));
-  const payload = {
-    chain: {
-      id: obs.chainId,
-      current: obs.current,
-      max: obs.max,
-      timeout_s: obs.timeoutS,
-      cooldown_s: obs.cooldownS,
-      observed_at: obs.polledAt,
-    },
-    on_duty: order.map((id) => {
-      const s = activeShifts.find((x) => x.member_id === id)!;
-      return {
-        id,
-        name: names.get(id) ?? "?",
-        started_at: toS(s.started_at),
-        last_save_at: s.last_save_at ? toS(s.last_save_at) : null,
-      };
-    }),
-    turn_member_id: order[0] ?? null,
-    last_save: lastSave ?? null,
-    danger: obs.chainId > 0 && obs.current > 0 && obs.timeoutS <= settings.alert_threshold_s,
-    alert_threshold_s: settings.alert_threshold_s,
-    poller_at: Math.floor(Date.now() / 1000),
-  };
-
+/**
+ * Content-free nudge on the public Realtime channel. Clients react by
+ * re-fetching the authenticated /api/state, so a forged broadcast can waste a
+ * fetch but can never spoof chain state, and the channel leaks nothing.
+ */
+async function pokeClients(): Promise<void> {
   const url = Deno.env.get("SUPABASE_URL")!;
   const key = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
   try {
@@ -568,10 +619,11 @@ async function broadcastState(
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        messages: [{ topic: "chain", event: "state", payload, private: false }],
+        messages: [{ topic: "chain", event: "poke", payload: {}, private: false }],
       }),
+      signal: AbortSignal.timeout(5_000),
     });
   } catch (e) {
-    console.error("broadcast failed:", e);
+    console.error("poke failed:", e);
   }
 }

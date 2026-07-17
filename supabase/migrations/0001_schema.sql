@@ -9,7 +9,7 @@ create table settings (
   per_save_bonus numeric not null default 0,       -- Torn $ per confirmed save
   save_threshold_s int not null default 90,        -- hit with <= this remaining => save
   alert_threshold_s int not null default 90,       -- push/danger UI below this
-  poll_interval_s int not null default 20,
+  poll_interval_s int not null default 15,  -- active cadence; cron floor is 15s
   idle_poll_interval_s int not null default 60,    -- cadence when no chain & nobody on duty
   leader_id bigint,
   co_leader_id bigint,
@@ -26,6 +26,7 @@ create table members (
   api_key_iv text,                    -- base64 96-bit IV
   key_access_level text,              -- "Limited" / "Full Access"
   key_valid boolean not null default true,
+  rate_limited_until timestamptz,      -- backoff window after Torn error 5
   is_admin boolean not null default false,
   admin_source text check (admin_source in ('auto', 'granted')),
   created_at timestamptz not null default now(),
@@ -93,6 +94,9 @@ create table saves (
 );
 create index saves_pending on saves (status) where status = 'pending';
 create index saves_member on saves (member_id);
+-- hot "latest save" lookup for the live page
+create index saves_recent on saves (detected_at desc)
+  where status in ('confirmed', 'unattributed');
 
 -- ── web push ─────────────────────────────────────────────────────────────
 create table push_subscriptions (
@@ -108,18 +112,28 @@ create table push_subscriptions (
 );
 create index push_subs_member on push_subscriptions (member_id);
 
--- audit + dedup; pruned after 30 days
+-- audit + dedup; pruned after 30 days. The UNIQUE index IS the dedup
+-- mechanism: senders claim by insert-on-conflict-do-nothing, so at-most-once
+-- per (key, member, channel) is a database invariant, not a timing accident.
 create table notifications_log (
   id bigserial primary key,
-  member_id bigint,
+  member_id bigint not null,
   channel text not null,                  -- 'webpush' (later: 'discord')
   event_type text not null,               -- 'timer_low' | 'your_turn' | 'scooped' | 'shift_end' | 'save_confirmed'
   dedup_key text not null,
   sent_at timestamptz not null default now(),
   success boolean,
-  error text
+  error text,
+  unique (dedup_key, member_id, channel)
 );
-create index notif_dedup on notifications_log (dedup_key, sent_at);
+
+-- login rate limiting; pruned nightly
+create table login_attempts (
+  id bigserial primary key,
+  ip text not null,
+  at timestamptz not null default now()
+);
+create index login_attempts_ip_at on login_attempts (ip, at);
 
 -- ── payouts ──────────────────────────────────────────────────────────────
 create table payout_periods (
@@ -162,11 +176,96 @@ create table poller_state (
   last_timeout_s int,
   last_cooldown_s int,
   running_since timestamptz,              -- overlap guard; stale after 60s
+  last_max int not null default 0,
   consecutive_errors int not null default 0,
   danger_episode_key text,
-  roster_refreshed_at timestamptz
+  roster_refreshed_at timestamptz,
+  last_broadcast_fingerprint text,
+  last_broadcast_at timestamptz
 );
 insert into poller_state (id) values (1);
+
+-- ── payout generation: one transaction, claim-once, crash-safe ───────────
+-- Claims EVERYTHING unpaid up to p_end (ended shifts + confirmed saves), so
+-- late manual attributions are always swept into the next run. p_start is a
+-- report label. Row-level "payout_line_id is null" guards make concurrent
+-- runs safe: the first writer wins each row, and amounts are computed from
+-- the rows this line actually won.
+create or replace function generate_payout(
+  p_start timestamptz,
+  p_end timestamptz,
+  p_created_by bigint
+) returns jsonb
+language plpgsql
+as $$
+declare
+  v_period_id uuid;
+  v_member bigint;
+  v_line_id uuid;
+  v_duty bigint;
+  v_hours numeric;
+  v_saves_amt numeric;
+  v_save_count int;
+  v_lines int := 0;
+begin
+  insert into payout_periods (period_start, period_end, created_by)
+  values (p_start, p_end, p_created_by)
+  returning id into v_period_id;
+
+  for v_member in
+    select distinct member_id from (
+      select member_id from shifts
+       where payout_line_id is null and ended_at is not null and ended_at <= p_end
+      union
+      select member_id from saves
+       where payout_line_id is null and status = 'confirmed'
+         and member_id is not null and detected_at <= p_end
+    ) candidates
+  loop
+    insert into payout_lines
+      (period_id, member_id, duty_seconds, save_count, hours_amount, saves_amount, total_amount)
+    values (v_period_id, v_member, 0, 0, 0, 0, 0)
+    returning id into v_line_id;
+
+    update shifts set payout_line_id = v_line_id
+     where member_id = v_member and payout_line_id is null
+       and ended_at is not null and ended_at <= p_end;
+
+    update saves set payout_line_id = v_line_id
+     where member_id = v_member and payout_line_id is null
+       and status = 'confirmed' and detected_at <= p_end;
+
+    select coalesce(sum(extract(epoch from (ended_at - started_at))), 0)::bigint,
+           coalesce(sum(extract(epoch from (ended_at - started_at)) / 3600.0
+                        * hourly_rate_snapshot), 0)
+      into v_duty, v_hours
+      from shifts where payout_line_id = v_line_id;
+
+    select count(*), coalesce(sum(bonus_snapshot), 0)
+      into v_save_count, v_saves_amt
+      from saves where payout_line_id = v_line_id;
+
+    if v_duty = 0 and v_save_count = 0 then
+      delete from payout_lines where id = v_line_id;
+    else
+      update payout_lines
+         set duty_seconds = v_duty,
+             save_count = v_save_count,
+             hours_amount = round(v_hours),
+             saves_amount = round(v_saves_amt),
+             total_amount = round(v_hours) + round(v_saves_amt)
+       where id = v_line_id;
+      v_lines := v_lines + 1;
+    end if;
+  end loop;
+
+  if v_lines = 0 then
+    delete from payout_periods where id = v_period_id;
+    return jsonb_build_object('error', 'nothing to pay');
+  end if;
+  return jsonb_build_object('period_id', v_period_id, 'lines', v_lines);
+end;
+$$;
 
 -- ── lock it all down: service-role only ──────────────────────────────────
 alter table settings enable row level security;
@@ -180,3 +279,4 @@ alter table notifications_log enable row level security;
 alter table payout_periods enable row level security;
 alter table payout_lines enable row level security;
 alter table poller_state enable row level security;
+alter table login_attempts enable row level security;

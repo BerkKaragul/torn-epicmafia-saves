@@ -3,12 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { supabaseBrowser } from "@/lib/supabase-browser";
 import type { StatePayload } from "@/lib/state";
-
-const fmtClock = (s: number) => {
-  const m = Math.floor(s / 60);
-  const sec = Math.floor(s % 60);
-  return `${m}:${String(sec).padStart(2, "0")}`;
-};
+import { fmtClock } from "@/lib/format";
 
 export function LiveChain({ initial, myId }: { initial: StatePayload; myId: number }) {
   const [state, setState] = useState<StatePayload>(initial);
@@ -17,24 +12,45 @@ export function LiveChain({ initial, myId }: { initial: StatePayload; myId: numb
   const audioCtx = useRef<AudioContext | null>(null);
   const lastBeep = useRef(0);
 
-  // realtime updates + safety-net polling
+  // Realtime "poke" → re-fetch the authenticated /api/state. The public
+  // channel carries no data, so a forged broadcast can waste a fetch but can
+  // never spoof chain state; the 30s poll runs only while the socket is down.
+  const channelUp = useRef(false);
   useEffect(() => {
-    const sb = supabaseBrowser();
-    const channel = sb
-      ?.channel("chain")
-      .on("broadcast", { event: "state" }, ({ payload }) => setState(payload as StatePayload))
-      .subscribe();
-    const poll = setInterval(async () => {
+    let refetchTimer: ReturnType<typeof setTimeout> | null = null;
+    const fetchState = async () => {
       try {
         const res = await fetch("/api/state");
         if (res.ok) setState(await res.json());
       } catch {
         /* offline; keep extrapolating */
       }
+    };
+    const debouncedFetch = () => {
+      if (refetchTimer) clearTimeout(refetchTimer);
+      refetchTimer = setTimeout(fetchState, 300);
+    };
+
+    const sb = supabaseBrowser();
+    const channel = sb
+      ?.channel("chain")
+      .on("broadcast", { event: "poke" }, debouncedFetch)
+      .subscribe((status) => {
+        channelUp.current = status === "SUBSCRIBED";
+        if (status === "SUBSCRIBED") debouncedFetch();
+      });
+    const poll = setInterval(() => {
+      if (!channelUp.current) fetchState();
     }, 30_000);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") debouncedFetch();
+    };
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
       channel?.unsubscribe();
       clearInterval(poll);
+      if (refetchTimer) clearTimeout(refetchTimer);
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, []);
 

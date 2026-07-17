@@ -37,7 +37,7 @@ export async function sessionTornId(): Promise<number | null> {
   const jwt = (await cookies()).get(COOKIE_NAME)?.value;
   if (!jwt) return null;
   try {
-    const { payload } = await jwtVerify(jwt, secret());
+    const { payload } = await jwtVerify(jwt, secret(), { algorithms: ["HS256"] });
     return payload.sub ? Number(payload.sub) : null;
   } catch {
     return null;

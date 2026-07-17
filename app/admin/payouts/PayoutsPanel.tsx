@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { fmtMoney } from "@/lib/format";
 
 interface Line {
   id: string;
@@ -22,7 +23,6 @@ interface Period {
   payout_lines: Line[];
 }
 
-const fmtMoney = (n: number) => "$" + Math.round(n).toLocaleString("en-US");
 const fmtH = (s: number) => (s / 3600).toFixed(1) + "h";
 const fmtDate = (iso: string) =>
   new Date(iso).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" });
@@ -89,9 +89,10 @@ export function PayoutsPanel() {
       >
         <h2 className="font-bold">Generate payout report</h2>
         <p className="mt-1 text-xs text-neutral-500">
-          Includes every <em>ended, not-yet-paid</em> shift and confirmed save in the range.
-          Members still on duty get counted once they stop. Each row is claimed exactly once —
-          re-running a range never double-pays.
+          Sweeps <em>everything unpaid up to the end date</em>: ended shifts (counted in full in
+          the report where they ended) and confirmed saves, including late manual attributions
+          from before the start date. Members still on duty get counted once they stop. Each row
+          is claimed exactly once — re-running never double-pays.
         </p>
         <div className="mt-3 flex flex-wrap items-end gap-3">
           <label className="text-sm">

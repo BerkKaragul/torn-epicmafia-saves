@@ -7,6 +7,7 @@ export interface MemberRow {
   api_key_iv: string | null;
   key_access_level: string | null;
   key_valid: boolean;
+  rate_limited_until: string | null;
   is_admin: boolean;
   admin_source: "auto" | "granted" | null;
   created_at: string;

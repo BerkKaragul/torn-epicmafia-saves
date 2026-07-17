@@ -1,6 +1,12 @@
 // Notification dispatch abstraction. The poller emits semantic events; this
 // module fans them out to channels. v1 ships Web Push — a Discord webhook
 // channel can be added here later without touching detection code.
+//
+// Dedup is a DATABASE claim: a unique index on notifications_log
+// (dedup_key, member_id, channel) and insert-on-conflict-do-nothing decide
+// who sends. At-most-once holds even if two poller cycles race. Members with
+// no push subscription are not claimed, so subscribing later still works for
+// future events.
 
 import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
 import * as webpush from "jsr:@negrel/webpush@0.5.0";
@@ -16,9 +22,8 @@ export interface NotifyEvent {
   title: string;
   body: string;
   url?: string;
-  /** identical dedupKey within dedupWindowS is sent at most once per member */
+  /** each (dedupKey, member) pair is sent at most once, ever */
   dedupKey: string;
-  dedupWindowS?: number;
 }
 
 interface PushSubRow {
@@ -56,25 +61,33 @@ export async function dispatch(
   ev: NotifyEvent,
 ): Promise<void> {
   if (memberIds.length === 0) return;
-  const windowS = ev.dedupWindowS ?? 240;
-  const since = new Date(Date.now() - windowS * 1000).toISOString();
-
-  const { data: recent } = await sb
-    .from("notifications_log")
-    .select("member_id")
-    .eq("dedup_key", ev.dedupKey)
-    .gte("sent_at", since);
-  const alreadySent = new Set((recent ?? []).map((r: { member_id: number }) => r.member_id));
-  const targets = memberIds.filter((id) => !alreadySent.has(id));
-  if (targets.length === 0) return;
+  const server = await getAppServer();
+  if (!server) return;
 
   const { data: subs } = await sb
     .from("push_subscriptions")
     .select("id, member_id, endpoint, p256dh, auth, failed_count")
-    .in("member_id", targets)
+    .in("member_id", memberIds)
     .eq("disabled", false);
+  const subRows = (subs ?? []) as PushSubRow[];
+  const withSubs = [...new Set(subRows.map((s) => s.member_id))];
+  if (withSubs.length === 0) return;
 
-  const server = await getAppServer();
+  // claim: only rows that actually insert are ours to send
+  const { data: won } = await sb
+    .from("notifications_log")
+    .upsert(
+      withSubs.map((memberId) => ({
+        member_id: memberId,
+        channel: "webpush",
+        event_type: ev.type,
+        dedup_key: ev.dedupKey,
+      })),
+      { onConflict: "dedup_key,member_id,channel", ignoreDuplicates: true },
+    )
+    .select("id, member_id");
+  if (!won?.length) return;
+
   const payload = JSON.stringify({
     title: ev.title,
     body: ev.body,
@@ -82,44 +95,34 @@ export async function dispatch(
     type: ev.type,
   });
 
-  const logRows: Record<string, unknown>[] = [];
-  for (const memberId of targets) {
-    const memberSubs = ((subs ?? []) as PushSubRow[]).filter((s) => s.member_id === memberId);
-    let success = memberSubs.length > 0 && server !== null;
-    let error: string | null = null;
-
-    for (const sub of memberSubs) {
-      if (!server) break;
-      try {
-        const subscriber = server.subscribe({
-          endpoint: sub.endpoint,
-          keys: { p256dh: sub.p256dh, auth: sub.auth },
-        });
-        await subscriber.pushTextMessage(payload, { urgency: webpush.Urgency.High });
-      } catch (e) {
-        success = false;
-        error = e instanceof Error ? e.message : String(e);
-        const gone =
-          e instanceof webpush.PushMessageError && (e.response.status === 404 || e.response.status === 410);
-        await sb
-          .from("push_subscriptions")
-          .update(
-            gone
-              ? { disabled: true, failed_count: sub.failed_count + 1 }
-              : { failed_count: sub.failed_count + 1 },
-          )
-          .eq("id", sub.id);
+  await Promise.all(
+    won.map(async (claim: { id: number; member_id: number }) => {
+      let success = true;
+      let error: string | null = null;
+      for (const sub of subRows.filter((s) => s.member_id === claim.member_id)) {
+        try {
+          const subscriber = server.subscribe({
+            endpoint: sub.endpoint,
+            keys: { p256dh: sub.p256dh, auth: sub.auth },
+          });
+          await subscriber.pushTextMessage(payload, { urgency: webpush.Urgency.High });
+        } catch (e) {
+          success = false;
+          error = e instanceof Error ? e.message : String(e);
+          const gone =
+            e instanceof webpush.PushMessageError &&
+            (e.response.status === 404 || e.response.status === 410);
+          await sb
+            .from("push_subscriptions")
+            .update(
+              gone
+                ? { disabled: true, failed_count: sub.failed_count + 1 }
+                : { failed_count: sub.failed_count + 1 },
+            )
+            .eq("id", sub.id);
+        }
       }
-    }
-
-    logRows.push({
-      member_id: memberId,
-      channel: "webpush",
-      event_type: ev.type,
-      dedup_key: ev.dedupKey,
-      success,
-      error,
-    });
-  }
-  if (logRows.length) await sb.from("notifications_log").insert(logRows);
+      await sb.from("notifications_log").update({ success, error }).eq("id", claim.id);
+    }),
+  );
 }

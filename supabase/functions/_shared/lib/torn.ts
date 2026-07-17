@@ -94,9 +94,13 @@ export class TornApiError extends Error {
   }
 }
 
-/** Key is wrong/expired/disabled — quarantine it and make the member re-login. */
+/**
+ * Key is wrong/expired/disabled — quarantine it and make the member re-login.
+ * Deliberately EXCLUDES 16 ("access level too low"): that key still works,
+ * it just can't call this particular endpoint.
+ */
 export function isInvalidKeyError(e: unknown): boolean {
-  return e instanceof TornApiError && [1, 2, 10, 13, 16, 18].includes(e.code);
+  return e instanceof TornApiError && [2, 10, 13, 18].includes(e.code);
 }
 
 /** Too many requests for this key's owner (100/min per user). Back off. */
@@ -119,14 +123,19 @@ export function makeTornClient(opts: TornClientOptions) {
   async function call<T>(path: string, params?: Record<string, string | number>): Promise<T> {
     const url = new URL(base + path);
     for (const [k, v] of Object.entries(params ?? {})) url.searchParams.set(k, String(v));
-    // Torn serves identical requests from a ~30s cache; a changing timestamp
-    // makes each request unique (the officially documented bypass). Without
-    // this, a 15s poller would read chain timers up to 30s stale.
+    // The key goes in the URL, not a header: Torn's ~30s response cache keys
+    // on the request URL, so header-auth requests from DIFFERENT members with
+    // identical query strings could be served each other's cached data.
+    url.searchParams.set("key", opts.apiKey);
+    // A changing timestamp makes each request unique — the documented cache
+    // bypass. Without it a 15s poller reads chain timers up to 30s stale.
     url.searchParams.set("timestamp", String(Math.floor(Date.now() / 1000)));
     // Shows as the requester in the key owner's own key-usage audit log.
     url.searchParams.set("comment", "ChainWatch");
     const res = await doFetch(url.toString(), {
-      headers: { Authorization: `ApiKey ${opts.apiKey}` },
+      // Bound every call so a hung request can never outlive the poller's
+      // overlap-lock lease.
+      signal: AbortSignal.timeout(10_000),
     });
     let body: unknown;
     try {

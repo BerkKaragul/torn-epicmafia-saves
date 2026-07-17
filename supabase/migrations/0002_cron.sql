@@ -35,5 +35,6 @@ select cron.schedule(
   $$
   delete from chain_polls where polled_at < now() - interval '7 days';
   delete from notifications_log where sent_at < now() - interval '30 days';
+  delete from login_attempts where at < now() - interval '1 day';
   $$
 );

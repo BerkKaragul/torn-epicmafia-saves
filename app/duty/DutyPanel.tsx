@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { currentPushStatus, disablePush, enablePush, type PushStatus } from "./push";
+import { fmtDuration, fmtMoney } from "@/lib/format";
 
 interface Me {
   member: { torn_id: number; name: string; is_admin: boolean; key_valid: boolean };
@@ -13,15 +14,6 @@ interface Me {
   } | null;
   rates: { hourly_rate: number; per_save_bonus: number } | null;
   unpaid: { duty_seconds: number; hours_amount: number; save_count: number; saves_amount: number };
-}
-
-const fmtMoney = (n: number) => "$" + Math.round(n).toLocaleString("en-US");
-
-function fmtDuration(totalS: number): string {
-  const h = Math.floor(totalS / 3600);
-  const m = Math.floor((totalS % 3600) / 60);
-  const s = Math.floor(totalS % 60);
-  return h > 0 ? `${h}h ${m}m ${s}s` : m > 0 ? `${m}m ${s}s` : `${s}s`;
 }
 
 export function DutyPanel() {

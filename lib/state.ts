@@ -1,5 +1,5 @@
 import { db } from "@/lib/db";
-import { rotationOrder } from "@/supabase/functions/_shared/logic/rotation";
+import { rotationOrder, turnMemberId } from "@/supabase/functions/_shared/logic/rotation";
 import type { SettingsRow, ShiftRow } from "@/lib/types";
 
 const toS = (iso: string) => Math.floor(Date.parse(iso) / 1000);
@@ -22,7 +22,6 @@ export interface StatePayload {
     hit_registered_at: string | null;
     status: string;
   } | null;
-  danger: boolean;
   alert_threshold_s: number;
   poller_at: number | null;
 }
@@ -55,13 +54,12 @@ export async function buildStatePayload(): Promise<StatePayload> {
   }));
   const order = rotationOrder(lites);
   const observedAt = state?.last_poll_at ? toS(state.last_poll_at) : 0;
-  const chainActive = (state?.last_chain_id ?? 0) > 0 && (state?.last_current ?? 0) > 0;
 
   return {
     chain: {
       id: state?.last_chain_id ?? 0,
       current: state?.last_current ?? 0,
-      max: 0,
+      max: state?.last_max ?? 0,
       timeout_s: state?.last_timeout_s ?? 0,
       cooldown_s: state?.last_cooldown_s ?? 0,
       observed_at: observedAt,
@@ -75,10 +73,8 @@ export async function buildStatePayload(): Promise<StatePayload> {
         last_save_at: s.last_save_at ? toS(s.last_save_at) : null,
       };
     }),
-    turn_member_id: order[0] ?? null,
+    turn_member_id: turnMemberId(lites),
     last_save: (lastSave as StatePayload["last_save"]) ?? null,
-    danger:
-      chainActive && (state?.last_timeout_s ?? Infinity) <= (settings?.alert_threshold_s ?? 90),
     alert_threshold_s: settings?.alert_threshold_s ?? 90,
     poller_at: state?.last_poll_at ? toS(state.last_poll_at) : null,
   };

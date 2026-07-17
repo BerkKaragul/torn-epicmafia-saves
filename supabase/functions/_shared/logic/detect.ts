@@ -77,29 +77,13 @@ export function detect(
   }
 
   const prevActive = isActive(prev);
+  const sameChain = next.chainId === prev.chainId;
 
-  if (prevActive && (!nextActive || next.chainId !== prev.chainId)) {
-    events.push({
-      type: "chain_ended",
-      chainId: prev.chainId,
-      finalCount: prev.current,
-      reason: nextActive ? "unknown" : MILESTONES.has(prev.current) ? "completed" : "dropped",
-    });
-  }
-
-  if (nextActive && (!prevActive || next.chainId !== prev.chainId)) {
-    events.push({ type: "chain_started", chainId: next.chainId, at: next.polledAt });
-    if (next.current > 0) {
-      events.push({
-        type: "hits_observed",
-        chainId: next.chainId,
-        fromCount: 0,
-        toCount: next.current,
-      });
-    }
-  }
-
-  if (prevActive && nextActive && next.chainId === prev.chainId && next.current > prev.current) {
+  // Hits on the same chain id are visible even when the chain just completed
+  // into cooldown — the final hit (e.g. a milestone finisher) may itself be
+  // the save, so this must run before/independently of the ended branch.
+  const hitsVisible = prevActive && sameChain && next.current > prev.current;
+  if (hitsVisible) {
     events.push({
       type: "hits_observed",
       chainId: next.chainId,
@@ -115,6 +99,28 @@ export function detect(
         windowStart: prev.polledAt,
         windowEnd: next.polledAt,
         timeoutAtWindowStart: prev.timeoutS,
+      });
+    }
+  }
+
+  if (prevActive && (!nextActive || !sameChain)) {
+    const finalCount = hitsVisible ? next.current : prev.current;
+    events.push({
+      type: "chain_ended",
+      chainId: prev.chainId,
+      finalCount,
+      reason: nextActive ? "unknown" : MILESTONES.has(finalCount) ? "completed" : "dropped",
+    });
+  }
+
+  if (nextActive && (!prevActive || !sameChain)) {
+    events.push({ type: "chain_started", chainId: next.chainId, at: next.polledAt });
+    if (next.current > 0) {
+      events.push({
+        type: "hits_observed",
+        chainId: next.chainId,
+        fromCount: 0,
+        toCount: next.current,
       });
     }
   }

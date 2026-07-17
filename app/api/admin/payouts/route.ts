@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { forbidden, sessionMember, unauthorized } from "@/lib/session";
-import type { PayoutLineRow, SaveRow, ShiftRow } from "@/lib/types";
+import type { PayoutLineRow } from "@/lib/types";
 
 // GET ?period_id=&format=csv → CSV export; GET → periods with lines
 export async function GET(req: Request) {
@@ -69,122 +69,25 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Invalid period range" }, { status: 400 });
   }
 
-  const { data: period, error: pErr } = await db()
-    .from("payout_periods")
-    .insert({
-      period_start: start.toISOString(),
-      period_end: end.toISOString(),
-      created_by: admin.torn_id,
-    })
-    .select("*")
-    .single();
-  if (pErr || !period) {
-    console.error("period create failed", pErr);
+  // One transactional SQL function: creates the period, claims every unpaid
+  // ended shift / confirmed save up to period_end (claim-once via the
+  // payout_line_id-is-null guard), and values the lines — crash-safe.
+  const { data, error } = await db().rpc("generate_payout", {
+    p_start: start.toISOString(),
+    p_end: end.toISOString(),
+    p_created_by: admin.torn_id,
+  });
+  if (error) {
+    console.error("generate_payout failed", error);
     return NextResponse.json({ error: "Could not create period" }, { status: 500 });
   }
-
-  // candidate members: anyone with an unpaid ended shift or confirmed save in range
-  const [{ data: shiftMembers }, { data: saveMembers }] = await Promise.all([
-    db()
-      .from("shifts")
-      .select("member_id")
-      .is("payout_line_id", null)
-      .not("ended_at", "is", null)
-      .gte("ended_at", period.period_start)
-      .lte("ended_at", period.period_end),
-    db()
-      .from("saves")
-      .select("member_id")
-      .eq("status", "confirmed")
-      .is("payout_line_id", null)
-      .not("member_id", "is", null)
-      .gte("detected_at", period.period_start)
-      .lte("detected_at", period.period_end),
-  ]);
-  const memberIds = [
-    ...new Set([
-      ...(shiftMembers ?? []).map((r: { member_id: number }) => r.member_id),
-      ...(saveMembers ?? []).map((r: { member_id: number | null }) => r.member_id!),
-    ]),
-  ];
-
-  let created = 0;
-  for (const memberId of memberIds) {
-    const { data: line } = await db()
-      .from("payout_lines")
-      .insert({
-        period_id: period.id,
-        member_id: memberId,
-        duty_seconds: 0,
-        save_count: 0,
-        hours_amount: 0,
-        saves_amount: 0,
-        total_amount: 0,
-      })
-      .select("id")
-      .single();
-    if (!line) continue;
-
-    // claim rows atomically (payout_line_id IS NULL guard prevents double-pay)
-    const { data: claimedShifts } = await db()
-      .from("shifts")
-      .update({ payout_line_id: line.id })
-      .eq("member_id", memberId)
-      .is("payout_line_id", null)
-      .not("ended_at", "is", null)
-      .gte("ended_at", period.period_start)
-      .lte("ended_at", period.period_end)
-      .select("*")
-      .returns<ShiftRow[]>();
-    const { data: claimedSaves } = await db()
-      .from("saves")
-      .update({ payout_line_id: line.id })
-      .eq("member_id", memberId)
-      .eq("status", "confirmed")
-      .is("payout_line_id", null)
-      .gte("detected_at", period.period_start)
-      .lte("detected_at", period.period_end)
-      .select("*")
-      .returns<SaveRow[]>();
-
-    let dutySeconds = 0;
-    let hoursAmount = 0;
-    for (const s of claimedShifts ?? []) {
-      const secs = (Date.parse(s.ended_at!) - Date.parse(s.started_at)) / 1000;
-      dutySeconds += secs;
-      hoursAmount += (secs / 3600) * Number(s.hourly_rate_snapshot);
-    }
-    const savesAmount = (claimedSaves ?? []).reduce(
-      (sum, s) => sum + Number(s.bonus_snapshot ?? 0),
-      0,
-    );
-    const saveCount = claimedSaves?.length ?? 0;
-
-    if (dutySeconds === 0 && saveCount === 0) {
-      await db().from("payout_lines").delete().eq("id", line.id);
-      continue;
-    }
-    await db()
-      .from("payout_lines")
-      .update({
-        duty_seconds: Math.round(dutySeconds),
-        save_count: saveCount,
-        hours_amount: Math.round(hoursAmount),
-        saves_amount: Math.round(savesAmount),
-        total_amount: Math.round(hoursAmount + savesAmount),
-      })
-      .eq("id", line.id);
-    created++;
-  }
-
-  if (created === 0) {
-    await db().from("payout_periods").delete().eq("id", period.id);
+  if (data?.error) {
     return NextResponse.json(
-      { error: "No unpaid shifts or saves in that range." },
+      { error: "Nothing unpaid up to that end date." },
       { status: 409 },
     );
   }
-  return NextResponse.json({ period_id: period.id, lines: created });
+  return NextResponse.json({ period_id: data.period_id, lines: data.lines });
 }
 
 // PATCH {line_id, paid} → mark a line paid/unpaid

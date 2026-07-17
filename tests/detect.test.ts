@@ -138,6 +138,45 @@ describe("detect: chain lifecycle", () => {
 });
 
 describe("detect: save candidates", () => {
+  test("credits a save that also completes the chain (milestone hit into cooldown)", () => {
+    // chain at 99, timer nearly dead; the saving hit #100 completes the
+    // milestone and the chain enters cooldown — still a save.
+    const events = detect(
+      active({ polledAt: 1000, current: 99, max: 100, timeoutS: 20 }),
+      active({ polledAt: 1015, current: 100, max: 100, timeoutS: 0, cooldownS: 600 }),
+      cfg,
+    );
+    expect(events).toContainEqual({
+      type: "save_candidate",
+      chainId: 777,
+      chainCount: 100,
+      windowStart: 1000,
+      windowEnd: 1015,
+      timeoutAtWindowStart: 20,
+    });
+    expect(events).toContainEqual({
+      type: "hits_observed",
+      chainId: 777,
+      fromCount: 99,
+      toCount: 100,
+    });
+    expect(events).toContainEqual({
+      type: "chain_ended",
+      chainId: 777,
+      finalCount: 100,
+      reason: "completed",
+    });
+  });
+
+  test("does not fabricate a save when the chain ends in cooldown without new hits", () => {
+    const events = detect(
+      active({ polledAt: 1000, current: 100, max: 100, timeoutS: 20 }),
+      active({ polledAt: 1015, current: 100, max: 100, timeoutS: 0, cooldownS: 600 }),
+      cfg,
+    );
+    expect(events.filter((e) => e.type === "save_candidate")).toHaveLength(0);
+  });
+
   test("emits hits_observed without save_candidate when the timer was high", () => {
     const events = detect(
       active({ polledAt: 1000, current: 5, timeoutS: 290 }),

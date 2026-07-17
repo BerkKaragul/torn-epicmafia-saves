@@ -67,9 +67,10 @@ npm run dev
    ```bash
    openssl rand -base64 32       # → API_KEY_ENC_KEY
    openssl rand -base64 32       # → POLLER_SECRET
-   node scripts/generate-vapid.mjs   # → VAPID_KEYS + NEXT_PUBLIC_VAPID_PUBLIC_KEY
+   node scripts/generate-vapid.mjs   # prints VAPID_KEYS and NEXT_PUBLIC_VAPID_PUBLIC_KEY
    ```
-4. Set the Edge Function secrets:
+4. Set the Edge Function secrets (VAPID_KEYS is the JSON JWK pair from the
+   script — the Edge Function reads VAPID_KEYS, not VAPID_PRIVATE_KEY):
    ```bash
    npx supabase secrets set POLLER_SECRET=... API_KEY_ENC_KEY=... VAPID_SUBJECT=mailto:you@example.com
    npx supabase secrets set VAPID_KEYS='{"publicKey":{...},"privateKey":{...}}'
@@ -108,8 +109,10 @@ npm run dev
    - `SUPABASE_SERVICE_ROLE_KEY` — same page (keep secret!)
    - `API_KEY_ENC_KEY` — same value as the Supabase secret
    - `SESSION_SECRET` — `openssl rand -base64 32`
-   - `FACTION_ID` — `40959`
    - `NEXT_PUBLIC_VAPID_PUBLIC_KEY` — from the generate-vapid script
+
+   (The faction id lives in the database: `settings.faction_id`, seeded to
+   40959. To track a different faction, update that row in the SQL editor.)
 3. Deploy. The daily `/api/keepalive` cron (vercel.json) plus the poller's
    own traffic keep the Supabase free project from pausing.
 

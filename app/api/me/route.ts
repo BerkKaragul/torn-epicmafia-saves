@@ -10,10 +10,11 @@ export async function GET() {
   const [
     { data: activeShift },
     { data: settings },
-    { data: myShifts },
+    { data: unpaidDuty },
     { data: mySaves },
     { count: missedTurns },
     { count: activeSavers },
+    { data: pollerState },
   ] = await Promise.all([
       db()
         .from("shifts")
@@ -22,15 +23,8 @@ export async function GET() {
         .is("ended_at", null)
         .maybeSingle<ShiftRow>(),
       db().from("settings").select("*").eq("id", 1).single<SettingsRow>(),
-      db()
-        .from("shifts")
-        .select("*")
-        .eq("member_id", member.torn_id)
-        .is("payout_line_id", null)
-        .not("ended_at", "is", null)
-        .order("started_at", { ascending: false })
-        .limit(50)
-        .returns<ShiftRow[]>(),
+      // billable = only time a chain was live during the member's unpaid shifts
+      db().rpc("member_unpaid_duty", { p_member: member.torn_id }),
       db()
         .from("saves")
         .select("*")
@@ -43,23 +37,22 @@ export async function GET() {
         .select("id", { count: "exact", head: true })
         .eq("member_id", member.torn_id),
       db().from("shifts").select("id", { count: "exact", head: true }).is("ended_at", null),
+      db()
+        .from("poller_state")
+        .select("last_chain_id, last_current, last_cooldown_s")
+        .eq("id", 1)
+        .maybeSingle(),
     ]);
 
-  // unpaid totals: closed shifts + the live one, valued at their snapshotted rates
-  const now = Date.now();
-  let dutySeconds = 0;
-  let hoursAmount = 0;
-  for (const s of myShifts ?? []) {
-    const secs = (new Date(s.ended_at!).getTime() - new Date(s.started_at).getTime()) / 1000;
-    dutySeconds += secs;
-    hoursAmount += (secs / 3600) * Number(s.hourly_rate_snapshot);
-  }
-  if (activeShift) {
-    const secs = (now - new Date(activeShift.started_at).getTime()) / 1000;
-    dutySeconds += secs;
-    hoursAmount += (secs / 3600) * Number(activeShift.hourly_rate_snapshot);
-  }
+  const duty = (unpaidDuty ?? { duty_seconds: 0, hours_amount: 0 }) as {
+    duty_seconds: number;
+    hours_amount: number;
+  };
   const savesAmount = (mySaves ?? []).reduce((sum, s) => sum + Number(s.bonus_snapshot ?? 0), 0);
+  const chainActive =
+    (pollerState?.last_chain_id ?? 0) > 0 &&
+    (pollerState?.last_current ?? 0) > 0 &&
+    (pollerState?.last_cooldown_s ?? 0) === 0;
 
   return NextResponse.json({
     member: {
@@ -78,11 +71,12 @@ export async function GET() {
         }
       : null,
     unpaid: {
-      duty_seconds: Math.round(dutySeconds),
-      hours_amount: Math.round(hoursAmount),
+      duty_seconds: Number(duty.duty_seconds),
+      hours_amount: Number(duty.hours_amount),
       save_count: (mySaves ?? []).length,
       saves_amount: Math.round(savesAmount),
     },
+    chain_active: chainActive,
     missed_turns: missedTurns ?? 0,
     slots: { cap: settings?.saver_cap ?? 0, active: activeSavers ?? 0 },
   });

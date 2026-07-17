@@ -18,6 +18,7 @@ interface Me {
     save_bonus_mode: "flat" | "scaled";
   } | null;
   unpaid: { duty_seconds: number; hours_amount: number; save_count: number; saves_amount: number };
+  chain_active: boolean;
   missed_turns: number;
   slots: { cap: number; active: number };
 }
@@ -42,7 +43,12 @@ export function DutyPanel() {
     load();
     currentPushStatus().then(setPush);
     const t = setInterval(() => setNowTick(Date.now()), 1000);
-    return () => clearInterval(t);
+    // refresh billable totals + live chain state periodically
+    const r = setInterval(load, 20_000);
+    return () => {
+      clearInterval(t);
+      clearInterval(r);
+    };
   }, [load]);
 
   async function togglePush() {
@@ -96,7 +102,6 @@ export function DutyPanel() {
   const elapsedS = shift ? (nowTick - new Date(shift.started_at).getTime()) / 1000 : 0;
   const plannedS = shift?.planned_minutes ? shift.planned_minutes * 60 : null;
   const remainingS = plannedS ? Math.max(0, plannedS - elapsedS) : null;
-  const liveEarned = shift ? (elapsedS / 3600) * Number(shift.hourly_rate_snapshot) : 0;
 
   return (
     <div className="flex flex-col gap-6">
@@ -108,12 +113,24 @@ export function DutyPanel() {
           </div>
           <p className="mt-3 text-4xl font-bold tabular-nums">{fmtDuration(elapsedS)}</p>
           <p className="mt-1 text-sm text-neutral-400">
-            earning {fmtMoney(shift.hourly_rate_snapshot)}/h · {fmtMoney(liveEarned)} so far this
-            shift
+            on duty · {fmtMoney(shift.hourly_rate_snapshot)}/h while a chain is live
             {remainingS !== null && (
               <> · auto-ends in <span className="tabular-nums">{fmtDuration(remainingS)}</span></>
             )}
           </p>
+          <div
+            className={`mt-3 inline-flex items-center gap-2 rounded-md px-3 py-1.5 text-sm font-semibold ${
+              me.chain_active
+                ? "bg-emerald-900/60 text-emerald-300"
+                : "bg-neutral-800 text-neutral-400"
+            }`}
+          >
+            {me.chain_active ? (
+              <>🟢 Chain live — your pay clock is running</>
+            ) : (
+              <>⏸ No chain right now — availability pay is paused</>
+            )}
+          </div>
           {stopping ? (
             <div className="mt-4 rounded-lg border border-red-900 bg-red-950/30 p-3">
               <p className="text-sm font-medium text-red-300">
@@ -243,12 +260,16 @@ export function DutyPanel() {
 
       <section className="rounded-xl border border-neutral-800 bg-neutral-900 p-6">
         <h2 className="text-lg font-bold">Owed to you (unpaid)</h2>
+        <p className="mt-1 text-xs text-neutral-500">
+          Availability pay counts only time a chain was actually live — dead peacetime while
+          you&apos;re enlisted doesn&apos;t pay.
+        </p>
         <div className="mt-3 grid grid-cols-2 gap-4 sm:grid-cols-4">
           <div>
             <p className="text-2xl font-bold tabular-nums">
               {fmtDuration(me.unpaid.duty_seconds)}
             </p>
-            <p className="text-xs text-neutral-500">duty time</p>
+            <p className="text-xs text-neutral-500">paid on-chain time</p>
           </div>
           <div>
             <p className="text-2xl font-bold tabular-nums">{fmtMoney(me.unpaid.hours_amount)}</p>

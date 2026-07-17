@@ -51,6 +51,13 @@ export type ChainEvent =
       reason: "completed" | "dropped" | "unknown";
     };
 
+// Chain bonus milestones. Torn cools down after EVERY chain end (6s/hit),
+// so "did it complete?" cannot be read from the cooldown field — a chain
+// completed iff its final count sits exactly on a milestone.
+const MILESTONES = new Set([
+  10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000,
+]);
+
 function isActive(o: ChainObservation): boolean {
   return o.chainId > 0 && o.current > 0 && o.cooldownS === 0;
 }
@@ -76,7 +83,7 @@ export function detect(
       type: "chain_ended",
       chainId: prev.chainId,
       finalCount: prev.current,
-      reason: nextActive ? "unknown" : next.cooldownS > 0 ? "completed" : "dropped",
+      reason: nextActive ? "unknown" : MILESTONES.has(prev.current) ? "completed" : "dropped",
     });
   }
 

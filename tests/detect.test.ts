@@ -91,6 +91,30 @@ describe("detect: chain lifecycle", () => {
     expect(later).toEqual([]);
   });
 
+  test("emits chain_ended (dropped) for a non-milestone count even though cooldown follows", () => {
+    // Torn cools down after EVERY chain end (6s/hit), so cooldown presence
+    // must not imply completion — only ending exactly on a milestone does.
+    const events = detect(
+      active({ polledAt: 1000, current: 137, max: 250, timeoutS: 2 }),
+      obs({ polledAt: 1015, cooldownS: 822 }),
+      cfg,
+    );
+    expect(events).toEqual([
+      { type: "chain_ended", chainId: 777, finalCount: 137, reason: "dropped" },
+    ]);
+  });
+
+  test("emits chain_ended (completed) on a milestone count even without observed cooldown", () => {
+    const events = detect(
+      active({ polledAt: 1000, current: 100, max: 250, timeoutS: 2 }),
+      obs({ polledAt: 1015 }),
+      cfg,
+    );
+    expect(events).toEqual([
+      { type: "chain_ended", chainId: 777, finalCount: 100, reason: "completed" },
+    ]);
+  });
+
   test("handles one chain replaced by another within a single window", () => {
     const events = detect(
       active({ polledAt: 1000, current: 9 }),

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { currentPushStatus, disablePush, enablePush, type PushStatus } from "./push";
 
 interface Me {
   member: { torn_id: number; name: string; is_admin: boolean; key_valid: boolean };
@@ -29,6 +30,8 @@ export function DutyPanel() {
   const [busy, setBusy] = useState(false);
   const [planned, setPlanned] = useState<string>("");
   const [nowTick, setNowTick] = useState(Date.now());
+  const [push, setPush] = useState<PushStatus>("unsupported");
+  const [pushError, setPushError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     const res = await fetch("/api/me");
@@ -37,9 +40,19 @@ export function DutyPanel() {
 
   useEffect(() => {
     load();
+    currentPushStatus().then(setPush);
     const t = setInterval(() => setNowTick(Date.now()), 1000);
     return () => clearInterval(t);
   }, [load]);
+
+  async function togglePush() {
+    setPushError(null);
+    try {
+      setPush(push === "on" ? await disablePush() : await enablePush());
+    } catch (e) {
+      setPushError(e instanceof Error ? e.message : "Push setup failed");
+    }
+  }
 
   async function startShift() {
     setBusy(true);
@@ -136,6 +149,36 @@ export function DutyPanel() {
       )}
 
       {error && <p className="text-sm text-red-400">{error}</p>}
+
+      <section className="rounded-xl border border-neutral-800 bg-neutral-900 p-6">
+        <h2 className="text-lg font-bold">Alerts</h2>
+        <p className="mt-1 text-sm text-neutral-400">
+          Get a push notification when it&apos;s your turn to save or the chain timer runs low —
+          works even with the site closed.
+        </p>
+        {push === "unsupported" ? (
+          <p className="mt-3 text-sm text-neutral-500">
+            This browser doesn&apos;t support push notifications.
+          </p>
+        ) : push === "denied" ? (
+          <p className="mt-3 text-sm text-amber-400">
+            Notifications are blocked for this site — allow them in your browser settings, then
+            reload.
+          </p>
+        ) : (
+          <button
+            onClick={togglePush}
+            className={`mt-3 rounded-md border px-4 py-2 text-sm font-semibold transition ${
+              push === "on"
+                ? "border-emerald-700 bg-emerald-950/50 text-emerald-300"
+                : "border-neutral-700 text-neutral-300 hover:bg-neutral-800"
+            }`}
+          >
+            {push === "on" ? "🔔 Notifications ON — click to disable" : "Enable notifications"}
+          </button>
+        )}
+        {pushError && <p className="mt-2 text-sm text-red-400">{pushError}</p>}
+      </section>
 
       <section className="rounded-xl border border-neutral-800 bg-neutral-900 p-6">
         <h2 className="text-lg font-bold">Owed to you (unpaid)</h2>

@@ -4,6 +4,8 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "ChainWatch — EPIC Mafia",
   description: "Chain saver duty tracker for EPIC Mafia [40959]",
+  manifest: "/manifest.webmanifest",
+  icons: { icon: "/icon.svg" },
 };
 
 export const viewport: Viewport = {

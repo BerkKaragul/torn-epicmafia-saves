@@ -48,10 +48,12 @@ export async function PATCH(req: Request) {
     }
     patch.save_bonus_mode = body.save_bonus_mode;
   }
-  if (patch.save_threshold_s != null && (patch.save_threshold_s < 10 || patch.save_threshold_s > 290)) {
+  const saveThreshold = patch.save_threshold_s;
+  if (typeof saveThreshold === "number" && (saveThreshold < 10 || saveThreshold > 290)) {
     return NextResponse.json({ error: "Save threshold must be 10–290s" }, { status: 400 });
   }
-  if (patch.poll_interval_s != null && patch.poll_interval_s < 15) {
+  const pollInterval = patch.poll_interval_s;
+  if (typeof pollInterval === "number" && pollInterval < 15) {
     return NextResponse.json({ error: "Poll interval can't go below 15s" }, { status: 400 });
   }
   if (Object.keys(patch).length === 0) {

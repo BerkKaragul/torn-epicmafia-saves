@@ -209,6 +209,10 @@ export function AdminPanel() {
 
       <section className="rounded-xl border border-neutral-800 bg-neutral-900 p-5">
         <h2 className="font-bold">Registered members ({members.length})</h2>
+        <p className="mt-1 text-xs text-neutral-500">
+          Faction leaders are admins automatically and can&apos;t be revoked. A &ldquo;grant
+          admin&rdquo; button appears next to every regular member once they&apos;ve logged in.
+        </p>
         <div className="mt-3 overflow-x-auto">
           <table className="w-full text-left text-sm">
             <thead className="text-xs uppercase text-neutral-500">
@@ -242,7 +246,7 @@ export function AdminPanel() {
                   </td>
                   <td className="py-2 pr-3">
                     {m.admin_source === "auto" ? (
-                      <span className="text-sky-400">leader</span>
+                      <span className="text-sky-400">leader — auto admin</span>
                     ) : (
                       <button
                         onClick={() => memberAction(m.torn_id, { is_admin: !m.is_admin })}

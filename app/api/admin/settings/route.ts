@@ -18,6 +18,7 @@ const EDITABLE = [
   "poll_interval_s",
   "idle_poll_interval_s",
   "poller_member_id",
+  "saver_cap",
 ] as const;
 
 export async function PATCH(req: Request) {

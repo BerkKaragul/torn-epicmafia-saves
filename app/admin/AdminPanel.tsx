@@ -7,6 +7,7 @@ interface Settings {
   per_save_bonus: number;
   save_threshold_s: number;
   alert_threshold_s: number;
+  saver_cap: number;
   poller_member_id: number | null;
 }
 
@@ -148,7 +149,23 @@ export function AdminPanel() {
               className="mt-1 w-full rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1.5"
             />
           </label>
+          <label className="text-sm">
+            <span className="text-neutral-400">Saver cap (0 = no limit)</span>
+            <input
+              type="number"
+              min={0}
+              max={100}
+              value={settings.saver_cap}
+              onChange={(e) => setSettings({ ...settings, saver_cap: num(e.target.value) })}
+              className="mt-1 w-full rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1.5"
+            />
+          </label>
         </div>
+        <p className="mt-2 text-xs text-neutral-500">
+          The cap limits how many savers can be on duty at once. Lowering it never kicks anyone
+          already enlisted — it only blocks new starts (use &ldquo;end shift&rdquo; below to
+          remove someone).
+        </p>
         <p className="mt-2 text-xs text-neutral-500">
           Rates are snapshotted when shifts start / saves confirm — changing them never rewrites
           history. Poller key:{" "}

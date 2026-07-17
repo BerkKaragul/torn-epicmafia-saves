@@ -23,6 +23,7 @@ export interface StatePayload {
     status: string;
   } | null;
   alert_threshold_s: number;
+  saver_cap: number;
   poller_at: number | null;
 }
 
@@ -76,6 +77,7 @@ export async function buildStatePayload(): Promise<StatePayload> {
     turn_member_id: turnMemberId(lites),
     last_save: (lastSave as StatePayload["last_save"]) ?? null,
     alert_threshold_s: settings?.alert_threshold_s ?? 90,
+    saver_cap: settings?.saver_cap ?? 0,
     poller_at: state?.last_poll_at ? toS(state.last_poll_at) : null,
   };
 }

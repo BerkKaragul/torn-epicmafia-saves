@@ -180,7 +180,18 @@ export function LiveChain({ initial, myId }: { initial: StatePayload; myId: numb
       </div>
 
       <section className="rounded-xl border border-neutral-800 bg-neutral-900 p-5">
-        <h2 className="font-bold">Savers on duty — rotation order</h2>
+        <h2 className="font-bold">
+          Savers on duty — rotation order
+          {state.saver_cap > 0 && (
+            <span
+              className={`ml-2 text-sm font-semibold ${
+                state.on_duty.length >= state.saver_cap ? "text-amber-400" : "text-neutral-500"
+              }`}
+            >
+              {state.on_duty.length}/{state.saver_cap} slots
+            </span>
+          )}
+        </h2>
         {state.on_duty.length === 0 ? (
           <p className="mt-2 text-sm text-neutral-500">
             Nobody is enlisted right now. Go to <span className="font-medium">My duty</span> to

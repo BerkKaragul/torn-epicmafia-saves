@@ -13,6 +13,7 @@ export async function GET() {
     { data: myShifts },
     { data: mySaves },
     { count: missedTurns },
+    { count: activeSavers },
   ] = await Promise.all([
       db()
         .from("shifts")
@@ -41,6 +42,7 @@ export async function GET() {
         .from("missed_turns")
         .select("id", { count: "exact", head: true })
         .eq("member_id", member.torn_id),
+      db().from("shifts").select("id", { count: "exact", head: true }).is("ended_at", null),
     ]);
 
   // unpaid totals: closed shifts + the live one, valued at their snapshotted rates
@@ -78,5 +80,6 @@ export async function GET() {
       saves_amount: Math.round(savesAmount),
     },
     missed_turns: missedTurns ?? 0,
+    slots: { cap: settings?.saver_cap ?? 0, active: activeSavers ?? 0 },
   });
 }

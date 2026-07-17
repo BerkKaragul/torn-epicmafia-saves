@@ -26,6 +26,7 @@ export interface SettingsRow {
   leader_id: number | null;
   co_leader_id: number | null;
   poller_member_id: number | null;
+  saver_cap: number;
   updated_at: string;
 }
 

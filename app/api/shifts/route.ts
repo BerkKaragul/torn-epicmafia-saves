@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { sessionMember, unauthorized } from "@/lib/session";
-import type { SettingsRow, ShiftRow } from "@/lib/types";
+import type { ShiftRow } from "@/lib/types";
 
 // POST = start a duty shift, PATCH = stop the active one
 export async function POST(req: Request) {
@@ -30,30 +30,27 @@ export async function POST(req: Request) {
     // empty body = open-ended shift
   }
 
-  const { data: settings } = await db()
-    .from("settings")
-    .select("*")
-    .eq("id", 1)
-    .single<SettingsRow>();
-
-  const { data: shift, error } = await db()
-    .from("shifts")
-    .insert({
-      member_id: member.torn_id,
-      planned_minutes: plannedMinutes,
-      hourly_rate_snapshot: settings?.hourly_rate ?? 0,
-    })
-    .select("*")
-    .single<ShiftRow>();
-
+  // start_shift enforces the saver cap atomically under an advisory lock
+  const { data, error } = await db().rpc("start_shift", {
+    p_member_id: member.torn_id,
+    p_planned_minutes: plannedMinutes,
+  });
   if (error) {
-    if (error.code === "23505") {
-      return NextResponse.json({ error: "You're already on duty." }, { status: 409 });
-    }
     console.error("shift start failed", error);
     return NextResponse.json({ error: "Could not start shift." }, { status: 500 });
   }
-  return NextResponse.json({ shift });
+  if (data?.error === "full") {
+    return NextResponse.json(
+      {
+        error: `All ${data.cap} saver slots are taken right now — try again when someone stops.`,
+      },
+      { status: 409 },
+    );
+  }
+  if (data?.error === "already_on_duty") {
+    return NextResponse.json({ error: "You're already on duty." }, { status: 409 });
+  }
+  return NextResponse.json({ shift: data.shift as ShiftRow });
 }
 
 export async function PATCH() {

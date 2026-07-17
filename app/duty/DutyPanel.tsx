@@ -15,6 +15,7 @@ interface Me {
   rates: { hourly_rate: number; per_save_bonus: number } | null;
   unpaid: { duty_seconds: number; hours_amount: number; save_count: number; saves_amount: number };
   missed_turns: number;
+  slots: { cap: number; active: number };
 }
 
 export function DutyPanel() {
@@ -111,11 +112,27 @@ export function DutyPanel() {
         </section>
       ) : (
         <section className="rounded-xl border border-neutral-800 bg-neutral-900 p-6">
-          <h2 className="text-lg font-bold">Enlist as a saver</h2>
+          <h2 className="text-lg font-bold">
+            Enlist as a saver
+            {me.slots.cap > 0 && (
+              <span
+                className={`ml-2 text-sm font-semibold ${
+                  me.slots.active >= me.slots.cap ? "text-red-400" : "text-neutral-500"
+                }`}
+              >
+                {me.slots.active}/{me.slots.cap} slots
+              </span>
+            )}
+          </h2>
           <p className="mt-1 text-sm text-neutral-400">
             Current rate: {fmtMoney(me.rates?.hourly_rate ?? 0)}/hour on duty +{" "}
             {fmtMoney(me.rates?.per_save_bonus ?? 0)} per save.
           </p>
+          {me.slots.cap > 0 && me.slots.active >= me.slots.cap && (
+            <p className="mt-2 text-sm text-amber-400">
+              All saver slots are taken — the button unlocks when someone stops.
+            </p>
+          )}
           <div className="mt-4 flex flex-wrap items-center gap-3">
             <select
               value={planned}
@@ -132,8 +149,8 @@ export function DutyPanel() {
             </select>
             <button
               onClick={startShift}
-              disabled={busy}
-              className="rounded-md bg-emerald-600 px-5 py-2 font-semibold text-white transition hover:bg-emerald-500 disabled:opacity-40"
+              disabled={busy || (me.slots.cap > 0 && me.slots.active >= me.slots.cap)}
+              className="rounded-md bg-emerald-600 px-5 py-2 font-semibold text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"
             >
               I can save — start
             </button>

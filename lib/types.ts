@@ -27,6 +27,7 @@ export interface SettingsRow {
   co_leader_id: number | null;
   poller_member_id: number | null;
   saver_cap: number;
+  save_bonus_mode: "flat" | "scaled";
   updated_at: string;
 }
 

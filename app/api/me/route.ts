@@ -71,7 +71,11 @@ export async function GET() {
     },
     activeShift,
     rates: settings
-      ? { hourly_rate: settings.hourly_rate, per_save_bonus: settings.per_save_bonus }
+      ? {
+          hourly_rate: settings.hourly_rate,
+          per_save_bonus: settings.per_save_bonus,
+          save_bonus_mode: settings.save_bonus_mode,
+        }
       : null,
     unpaid: {
       duty_seconds: Math.round(dutySeconds),

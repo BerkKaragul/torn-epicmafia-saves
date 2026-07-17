@@ -4,6 +4,7 @@
 import { createClient, type SupabaseClient } from "npm:@supabase/supabase-js@2";
 import { detect, type ChainEvent, type ChainObservation } from "../_shared/logic/detect.ts";
 import { rotationOrder, type ShiftLite } from "../_shared/logic/rotation.ts";
+import { saveBonus, type SaveBonusMode } from "../_shared/logic/pay.ts";
 import { decryptApiKey } from "../_shared/lib/crypto.ts";
 import {
   isInvalidKeyError,
@@ -35,6 +36,17 @@ interface ActiveShiftRow {
 }
 
 const MEMBER_KEY_COLS = "torn_id, name, api_key_ct, api_key_iv, key_valid, rate_limited_until";
+
+interface PollerSettings {
+  faction_id: number;
+  poll_interval_s: number;
+  idle_poll_interval_s: number;
+  poller_member_id: number | null;
+  save_threshold_s: number;
+  alert_threshold_s: number;
+  per_save_bonus: number;
+  save_bonus_mode: SaveBonusMode;
+}
 
 function sb(): SupabaseClient {
   return createClient(
@@ -79,11 +91,12 @@ export async function runPollCycle(): Promise<void> {
   const db = sb();
   const nowS = Math.floor(Date.now() / 1000);
 
-  const [{ data: settings }, { data: state0 }] = await Promise.all([
+  const [{ data: settingsRow }, { data: state0 }] = await Promise.all([
     db.from("settings").select("*").eq("id", 1).single(),
     db.from("poller_state").select("*").eq("id", 1).single(),
   ]);
-  if (!settings || !state0) return;
+  if (!settingsRow || !state0) return;
+  const settings = settingsRow as PollerSettings;
 
   const prevObs: ChainObservation | null = state0.last_poll_at
     ? {
@@ -229,7 +242,14 @@ export async function runPollCycle(): Promise<void> {
         const fullKey = `${ev.episodeKey}:${tier}`;
         if (fullKey !== dangerEpisodeKey) {
           dangerEpisodeKey = fullKey;
-          await alertDanger(db, activeShifts, ev.timeoutS, fullKey, tier === "critical");
+          await alertDanger(
+            db,
+            activeShifts,
+            ev.timeoutS,
+            fullKey,
+            tier === "critical",
+            settings.faction_id,
+          );
         }
       }
     }
@@ -247,6 +267,46 @@ export async function runPollCycle(): Promise<void> {
     );
     if (droppedChain && activeShifts.length > 0) {
       activeShifts = await handleChainDropped(db, activeShifts, droppedChain);
+    }
+
+    // ── broadcast urgent leave notes from savers who just stopped ────────
+    const { data: pendingNotes } = await db
+      .from("announcements")
+      .select("*, members(name)")
+      .is("processed_at", null)
+      .order("created_at");
+    for (const note of pendingNotes ?? []) {
+      const others = activeShifts.map((s) => s.member_id).filter((id) => id !== note.member_id);
+      const who = note.members?.name ?? `[${note.member_id}]`;
+      if (others.length) {
+        await dispatch(db, others, {
+          type: "saver_left",
+          title: note.was_head ? `🚨 ${who} bailed on their TURN` : `⚠️ Saver left: ${who}`,
+          body: note.message ?? "They can no longer save — adjust accordingly.",
+          url: "/",
+          dedupKey: `saver_left:${note.id}`,
+        });
+      }
+      await db
+        .from("announcements")
+        .update({ processed_at: toIso(nowS) })
+        .eq("id", note.id);
+    }
+    // if the head bailed while the timer is already low, the promoted head
+    // must get their your-turn push immediately (dedup targets only them)
+    const headBailed = (pendingNotes ?? []).some((n) => n.was_head);
+    const nowDangerous =
+      obsActive && obs.timeoutS <= settings.alert_threshold_s && activeShifts.length > 0;
+    if (headBailed && nowDangerous) {
+      const tier = obs.timeoutS <= 45 ? "critical" : "low";
+      await alertDanger(
+        db,
+        activeShifts,
+        obs.timeoutS,
+        `timer_low:${obs.chainId}:${obs.current}:${tier}`,
+        tier === "critical",
+        settings.faction_id,
+      );
     }
 
     // ── periodic roster / leadership refresh ─────────────────────────────
@@ -327,7 +387,7 @@ async function pickPollerMember(
 async function attributePendingSaves(
   db: SupabaseClient,
   activeShifts: ActiveShiftRow[],
-  settings: Record<string, number>,
+  settings: PollerSettings,
   nowS: number,
 ): Promise<ActiveShiftRow[]> {
   const { data: pending } = await db
@@ -409,6 +469,11 @@ async function attributePendingSaves(
           .eq("id", save.id)
           .eq("status", "pending"); // never clobber an admin's manual call
       } else {
+        const bonus = saveBonus(
+          settings.save_bonus_mode,
+          Number(settings.per_save_bonus),
+          save.chain_count,
+        );
         const { data: confirmedRow } = await db
           .from("saves")
           .update({
@@ -418,7 +483,7 @@ async function attributePendingSaves(
             attack_code: hit.code,
             hit_registered_at: toIso(hit.ended),
             remaining_at_hit_s: remaining,
-            bonus_snapshot: settings.per_save_bonus,
+            bonus_snapshot: bonus,
           })
           .eq("id", save.id)
           .eq("status", "pending") // never clobber an admin's manual call
@@ -432,7 +497,7 @@ async function attributePendingSaves(
           await dispatch(db, [shift.member_id], {
             type: "save_confirmed",
             title: "Save confirmed ✅",
-            body: `Chain hit #${save.chain_count} with ${shown}s left — bonus $${Number(settings.per_save_bonus).toLocaleString()}`,
+            body: `Chain hit #${save.chain_count} with ${shown}s left — bonus $${bonus.toLocaleString()}`,
             url: "/duty",
             dedupKey: `save_confirmed:${save.id}`,
           });
@@ -564,6 +629,7 @@ async function alertDanger(
   timeoutS: number,
   episodeKey: string,
   critical: boolean,
+  factionId: number,
 ): Promise<void> {
   const order = rotationOrder(toShiftLites(activeShifts));
   const head = order[0];
@@ -575,7 +641,7 @@ async function alertDanger(
     type: "your_turn",
     title: critical ? `🚨 LAST CHANCE — ${mmss} LEFT` : "🚨 YOUR TURN — SAVE NOW",
     body: `Chain timer at ${mmss}. Hit anyone and HOLD the result page.`,
-    url: "https://www.torn.com/page.php?sid=list&type=targets",
+    url: `https://www.torn.com/factions.php?step=profile&ID=${factionId}`,
     dedupKey: `${episodeKey}:head`,
   });
   const others = order.slice(1);

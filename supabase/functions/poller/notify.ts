@@ -20,7 +20,8 @@ export interface NotifyEvent {
     | "shift_end"
     | "save_confirmed"
     | "missed_turn"
-    | "chain_dropped";
+    | "chain_dropped"
+    | "saver_left";
   title: string;
   body: string;
   url?: string;

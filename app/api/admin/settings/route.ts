@@ -33,7 +33,7 @@ export async function PATCH(req: Request) {
     return NextResponse.json({ error: "Bad request" }, { status: 400 });
   }
 
-  const patch: Record<string, number> = {};
+  const patch: Record<string, number | string> = {};
   for (const key of EDITABLE) {
     if (body[key] == null) continue;
     const n = Number(body[key]);
@@ -41,6 +41,12 @@ export async function PATCH(req: Request) {
       return NextResponse.json({ error: `Invalid value for ${key}` }, { status: 400 });
     }
     patch[key] = n;
+  }
+  if (typeof body.save_bonus_mode === "string") {
+    if (!["flat", "scaled"].includes(body.save_bonus_mode)) {
+      return NextResponse.json({ error: "Invalid save bonus mode" }, { status: 400 });
+    }
+    patch.save_bonus_mode = body.save_bonus_mode;
   }
   if (patch.save_threshold_s != null && (patch.save_threshold_s < 10 || patch.save_threshold_s > 290)) {
     return NextResponse.json({ error: "Save threshold must be 10–290s" }, { status: 400 });

@@ -24,6 +24,7 @@ export interface StatePayload {
   } | null;
   alert_threshold_s: number;
   saver_cap: number;
+  faction_id: number;
   poller_at: number | null;
 }
 
@@ -78,6 +79,7 @@ export async function buildStatePayload(): Promise<StatePayload> {
     last_save: (lastSave as StatePayload["last_save"]) ?? null,
     alert_threshold_s: settings?.alert_threshold_s ?? 90,
     saver_cap: settings?.saver_cap ?? 0,
+    faction_id: settings?.faction_id ?? 0,
     poller_at: state?.last_poll_at ? toS(state.last_poll_at) : null,
   };
 }

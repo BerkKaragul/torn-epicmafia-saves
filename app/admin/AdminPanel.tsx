@@ -5,6 +5,7 @@ import { useCallback, useEffect, useState } from "react";
 interface Settings {
   hourly_rate: number;
   per_save_bonus: number;
+  save_bonus_mode: "flat" | "scaled";
   save_threshold_s: number;
   alert_threshold_s: number;
   saver_cap: number;
@@ -160,7 +161,24 @@ export function AdminPanel() {
               className="mt-1 w-full rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1.5"
             />
           </label>
+          <label className="text-sm">
+            <span className="text-neutral-400">Save bonus mode</span>
+            <select
+              value={settings.save_bonus_mode}
+              onChange={(e) =>
+                setSettings({ ...settings, save_bonus_mode: e.target.value as "flat" | "scaled" })
+              }
+              className="mt-1 w-full rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1.5"
+            >
+              <option value="flat">Flat — every save pays the base</option>
+              <option value="scaled">Scaled — base × (chain ÷ 100)</option>
+            </select>
+          </label>
         </div>
+        <p className="mt-2 text-xs text-neutral-500">
+          Scaled mode: saving a 1,200-chain pays 12× the base; anything at or below 100 pays the
+          base. Applies to saves confirmed from now on — already-earned bonuses never change.
+        </p>
         <p className="mt-2 text-xs text-neutral-500">
           The cap limits how many savers can be on duty at once. Lowering it never kicks anyone
           already enlisted — it only blocks new starts (use &ldquo;end shift&rdquo; below to

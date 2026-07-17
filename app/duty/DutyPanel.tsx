@@ -12,7 +12,11 @@ interface Me {
     planned_minutes: number | null;
     hourly_rate_snapshot: number;
   } | null;
-  rates: { hourly_rate: number; per_save_bonus: number } | null;
+  rates: {
+    hourly_rate: number;
+    per_save_bonus: number;
+    save_bonus_mode: "flat" | "scaled";
+  } | null;
   unpaid: { duty_seconds: number; hours_amount: number; save_count: number; saves_amount: number };
   missed_turns: number;
   slots: { cap: number; active: number };
@@ -26,6 +30,8 @@ export function DutyPanel() {
   const [nowTick, setNowTick] = useState(Date.now());
   const [push, setPush] = useState<PushStatus>("unsupported");
   const [pushError, setPushError] = useState<string | null>(null);
+  const [stopping, setStopping] = useState(false);
+  const [leaveMsg, setLeaveMsg] = useState("");
 
   const load = useCallback(async () => {
     const res = await fetch("/api/me");
@@ -69,9 +75,15 @@ export function DutyPanel() {
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch("/api/shifts", { method: "PATCH" });
+      const res = await fetch("/api/shifts", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: leaveMsg }),
+      });
       const body = await res.json();
       if (!res.ok) setError(body.error);
+      setStopping(false);
+      setLeaveMsg("");
       await load();
     } finally {
       setBusy(false);
@@ -102,13 +114,48 @@ export function DutyPanel() {
               <> · auto-ends in <span className="tabular-nums">{fmtDuration(remainingS)}</span></>
             )}
           </p>
-          <button
-            onClick={stopShift}
-            disabled={busy}
-            className="mt-4 rounded-md bg-red-700 px-4 py-2 font-semibold text-white transition hover:bg-red-600 disabled:opacity-40"
-          >
-            Stop saving
-          </button>
+          {stopping ? (
+            <div className="mt-4 rounded-lg border border-red-900 bg-red-950/30 p-3">
+              <p className="text-sm font-medium text-red-300">
+                Leaving duty — warn the other savers?
+              </p>
+              <input
+                value={leaveMsg}
+                onChange={(e) => setLeaveMsg(e.target.value)}
+                maxLength={200}
+                placeholder="Optional urgent note, e.g. “can't save anymore, react fast!”"
+                className="mt-2 w-full rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 text-sm"
+              />
+              <p className="mt-1 text-xs text-neutral-500">
+                Sent as a push to everyone still on duty (always sent if you leave while it&apos;s
+                your turn).
+              </p>
+              <div className="mt-2 flex gap-2">
+                <button
+                  onClick={stopShift}
+                  disabled={busy}
+                  className="rounded-md bg-red-700 px-4 py-2 text-sm font-semibold text-white hover:bg-red-600 disabled:opacity-40"
+                >
+                  Confirm — stop saving
+                </button>
+                <button
+                  onClick={() => setStopping(false)}
+                  disabled={busy}
+                  className="rounded-md border border-neutral-700 px-4 py-2 text-sm font-semibold text-neutral-300 hover:bg-neutral-800"
+                >
+                  Keep saving
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              onClick={() => setStopping(true)}
+              disabled={busy}
+              className="mt-4 rounded-md bg-red-700 px-4 py-2 font-semibold text-white transition hover:bg-red-600 disabled:opacity-40"
+            >
+              Stop saving
+            </button>
+          )}
         </section>
       ) : (
         <section className="rounded-xl border border-neutral-800 bg-neutral-900 p-6">
@@ -126,7 +173,11 @@ export function DutyPanel() {
           </h2>
           <p className="mt-1 text-sm text-neutral-400">
             Current rate: {fmtMoney(me.rates?.hourly_rate ?? 0)}/hour on duty +{" "}
-            {fmtMoney(me.rates?.per_save_bonus ?? 0)} per save.
+            {fmtMoney(me.rates?.per_save_bonus ?? 0)} per save
+            {me.rates?.save_bonus_mode === "scaled" && (
+              <span className="text-amber-400"> (scales with chain size — ×chain/100)</span>
+            )}
+            .
           </p>
           {me.slots.cap > 0 && me.slots.active >= me.slots.cap && (
             <p className="mt-2 text-sm text-amber-400">

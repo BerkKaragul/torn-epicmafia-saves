@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { forbidden, sessionMember, unauthorized } from "@/lib/session";
+import { saveBonus, type SaveBonusMode } from "@/supabase/functions/_shared/logic/pay";
 
 // GET: recent saves needing attention (unattributed / pending), plus recent confirmed
 export async function GET() {
@@ -32,18 +33,22 @@ export async function PATCH(req: Request) {
     return NextResponse.json({ error: "save_id and member_id required" }, { status: 400 });
   }
 
-  const { data: settings } = await db()
-    .from("settings")
-    .select("per_save_bonus")
-    .eq("id", 1)
-    .single();
+  const [{ data: settings }, { data: save }] = await Promise.all([
+    db().from("settings").select("per_save_bonus, save_bonus_mode").eq("id", 1).single(),
+    db().from("saves").select("chain_count").eq("id", body.save_id).maybeSingle(),
+  ]);
+  if (!save) return NextResponse.json({ error: "Save not found." }, { status: 404 });
 
   const { data: updated, error } = await db()
     .from("saves")
     .update({
       status: "confirmed",
       member_id: Number(body.member_id),
-      bonus_snapshot: settings?.per_save_bonus ?? 0,
+      bonus_snapshot: saveBonus(
+        (settings?.save_bonus_mode ?? "flat") as SaveBonusMode,
+        Number(settings?.per_save_bonus ?? 0),
+        save.chain_count,
+      ),
       note: `manually attributed by ${admin.name} [${admin.torn_id}]`,
     })
     .eq("id", body.save_id)

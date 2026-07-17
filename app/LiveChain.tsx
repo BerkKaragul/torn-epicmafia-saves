@@ -170,12 +170,12 @@ export function LiveChain({ initial, myId }: { initial: StatePayload; myId: numb
           {soundOn ? "🔊 Alarm armed" : "🔇 Arm alarm sound"}
         </button>
         <a
-          href="https://www.torn.com/page.php?sid=list&type=targets"
+          href={`https://www.torn.com/factions.php?step=profile&ID=${state.faction_id}`}
           target="_blank"
           rel="noreferrer"
           className="rounded-md bg-red-700 px-4 py-1.5 text-sm font-bold text-white hover:bg-red-600"
         >
-          Open your Torn targets ↗
+          Open faction page ↗
         </a>
       </div>
 

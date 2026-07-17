@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { sessionMember, unauthorized } from "@/lib/session";
+import { rotationOrder } from "@/supabase/functions/_shared/logic/rotation";
 import type { ShiftRow } from "@/lib/types";
 
 // POST = start a duty shift, PATCH = stop the active one
@@ -53,9 +54,34 @@ export async function POST(req: Request) {
   return NextResponse.json({ shift: data.shift as ShiftRow });
 }
 
-export async function PATCH() {
+export async function PATCH(req: Request) {
   const member = await sessionMember();
   if (!member) return unauthorized();
+
+  let message: string | null = null;
+  try {
+    const body = await req.json();
+    if (typeof body.message === "string") {
+      message = body.message.replace(/\s+/g, " ").trim().slice(0, 200) || null;
+    }
+  } catch {
+    /* no body = silent stop */
+  }
+
+  // was this member the rotation head at the moment they bailed?
+  const { data: active } = await db()
+    .from("shifts")
+    .select("member_id, started_at, last_save_at")
+    .is("ended_at", null);
+  const order = rotationOrder(
+    (active ?? []).map((s) => ({
+      memberId: s.member_id,
+      startedAt: Math.floor(Date.parse(s.started_at) / 1000),
+      lastSaveAt: s.last_save_at ? Math.floor(Date.parse(s.last_save_at) / 1000) : null,
+    })),
+  );
+  const wasHead = order[0] === member.torn_id;
+  const othersRemain = (active ?? []).some((s) => s.member_id !== member.torn_id);
 
   const { data: shift, error } = await db()
     .from("shifts")
@@ -70,5 +96,14 @@ export async function PATCH() {
     return NextResponse.json({ error: "Could not stop shift." }, { status: 500 });
   }
   if (!shift) return NextResponse.json({ error: "You're not on duty." }, { status: 409 });
+
+  // the poller broadcasts this to the remaining savers within ~15s
+  if (othersRemain && (message || wasHead)) {
+    await db().from("announcements").insert({
+      member_id: member.torn_id,
+      message,
+      was_head: wasHead,
+    });
+  }
   return NextResponse.json({ shift });
 }

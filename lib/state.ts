@@ -13,7 +13,13 @@ export interface StatePayload {
     cooldown_s: number;
     observed_at: number;
   };
-  on_duty: { id: number; name: string; started_at: number; last_save_at: number | null }[];
+  on_duty: {
+    id: number;
+    name: string;
+    started_at: number;
+    last_save_at: number | null;
+    unavailable_state: string | null;
+  }[];
   turn_member_id: number | null;
   last_save: {
     chain_count: number;
@@ -53,8 +59,12 @@ export async function buildStatePayload(): Promise<StatePayload> {
     memberId: s.member_id,
     startedAt: toS(s.started_at),
     lastSaveAt: s.last_save_at ? toS(s.last_save_at) : null,
+    available: !s.unavailable_state,
   }));
   const order = rotationOrder(lites);
+  // paused savers keep their shift but drop out of the turn order — list them
+  // after the queue so the page still shows they're enlisted
+  const pausedIds = active.filter((s) => s.unavailable_state).map((s) => s.member_id);
   const observedAt = state?.last_poll_at ? toS(state.last_poll_at) : 0;
 
   return {
@@ -66,13 +76,14 @@ export async function buildStatePayload(): Promise<StatePayload> {
       cooldown_s: state?.last_cooldown_s ?? 0,
       observed_at: observedAt,
     },
-    on_duty: order.map((id) => {
+    on_duty: [...order, ...pausedIds].map((id) => {
       const s = active.find((x) => x.member_id === id)!;
       return {
         id,
         name: s.members.name,
         started_at: toS(s.started_at),
         last_save_at: s.last_save_at ? toS(s.last_save_at) : null,
+        unavailable_state: s.unavailable_state,
       };
     }),
     turn_member_id: turnMemberId(lites),

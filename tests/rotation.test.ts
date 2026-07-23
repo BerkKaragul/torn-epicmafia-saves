@@ -38,6 +38,42 @@ describe("rotationOrder", () => {
   });
 });
 
+describe("rotationOrder: availability", () => {
+  test("excludes savers who can't attack right now (flying, hospital, jail)", () => {
+    const order = rotationOrder([
+      { ...shift(1, 50), available: false },
+      shift(2, 100),
+      shift(3, 150),
+    ]);
+    expect(order).toEqual([2, 3]);
+  });
+
+  test("passes the turn to the next available saver when the head flies", () => {
+    expect(
+      turnMemberId([{ ...shift(1, 50), available: false }, shift(2, 100)]),
+    ).toBe(2);
+  });
+
+  test("treats a missing available flag as available", () => {
+    expect(rotationOrder([shift(1, 50), { ...shift(2, 100), available: true }])).toEqual([1, 2]);
+  });
+
+  test("returns nobody when every saver is unavailable", () => {
+    expect(
+      rotationOrder([
+        { ...shift(1, 50), available: false },
+        { ...shift(2, 100), available: false },
+      ]),
+    ).toEqual([]);
+  });
+
+  test("restores an unavailable saver to their original slot once they're back", () => {
+    // member 1 started first, so returning from a flight puts them back at the
+    // front — availability gates the queue, it does not reorder it
+    expect(rotationOrder([shift(1, 50), shift(2, 100)])).toEqual([1, 2]);
+  });
+});
+
 describe("turnMemberId", () => {
   test("is the head of the rotation", () => {
     expect(turnMemberId([shift(1, 100), shift(2, 50)])).toBe(2);

@@ -1,8 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { currentPushStatus, disablePush, enablePush, type PushStatus } from "./push";
-import { fmtDuration, fmtMoney } from "@/lib/format";
+import { fmtClock, fmtDuration, fmtMoney } from "@/lib/format";
+import { alarmInterval, armAlarm, playAlarm } from "@/lib/alarm";
+import { supabaseBrowser } from "@/lib/supabase-browser";
 
 interface Me {
   member: { torn_id: number; name: string; is_admin: boolean; key_valid: boolean };
@@ -19,6 +21,16 @@ interface Me {
   } | null;
   unpaid: { duty_seconds: number; hours_amount: number; save_count: number; saves_amount: number };
   chain_active: boolean;
+  chain: {
+    id: number;
+    current: number;
+    max: number;
+    timeout_s: number;
+    cooldown_s: number;
+    observed_at: number;
+  };
+  alert_threshold_s: number;
+  unavailable_state: string | null;
   missed_turns: number;
   slots: { cap: number; active: number };
 }
@@ -33,6 +45,8 @@ export function DutyPanel() {
   const [pushError, setPushError] = useState<string | null>(null);
   const [stopping, setStopping] = useState(false);
   const [leaveMsg, setLeaveMsg] = useState("");
+  const [sirenOn, setSirenOn] = useState(false);
+  const sirenRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const load = useCallback(async () => {
     const res = await fetch("/api/me");
@@ -42,12 +56,18 @@ export function DutyPanel() {
   useEffect(() => {
     load();
     currentPushStatus().then(setPush);
-    const t = setInterval(() => setNowTick(Date.now()), 1000);
+    const t = setInterval(() => setNowTick(Date.now()), 500);
     // refresh billable totals + live chain state periodically
     const r = setInterval(load, 20_000);
+    // ...and immediately whenever the poller says something changed
+    const channel = supabaseBrowser()
+      ?.channel("chain")
+      .on("broadcast", { event: "poke" }, () => load())
+      .subscribe();
     return () => {
       clearInterval(t);
       clearInterval(r);
+      channel?.unsubscribe();
     };
   }, [load]);
 
@@ -96,6 +116,29 @@ export function DutyPanel() {
     }
   }
 
+  // live chain countdown, extrapolated between poller updates
+  const nowS = Math.floor(nowTick / 1000);
+  const chainLive = !!me && me.chain.id > 0 && me.chain.current > 0 && me.chain.cooldown_s === 0;
+  const chainRemaining =
+    me && chainLive ? Math.max(0, me.chain.timeout_s - (nowS - me.chain.observed_at)) : 0;
+  const chainDanger = !!me && chainLive && chainRemaining <= me.alert_threshold_s;
+  const chainCritical = chainLive && chainRemaining <= 45;
+
+  // siren while the chain is in danger (armed by the user, browsers require it)
+  useEffect(() => {
+    if (sirenRef.current) {
+      clearInterval(sirenRef.current);
+      sirenRef.current = null;
+    }
+    if (!sirenOn || !chainDanger) return;
+    playAlarm(chainCritical);
+    sirenRef.current = setInterval(() => playAlarm(chainCritical), alarmInterval(chainCritical));
+    return () => {
+      if (sirenRef.current) clearInterval(sirenRef.current);
+      sirenRef.current = null;
+    };
+  }, [sirenOn, chainDanger, chainCritical]);
+
   if (!me) return <p className="text-neutral-500">Loading…</p>;
 
   const shift = me.activeShift;
@@ -105,6 +148,78 @@ export function DutyPanel() {
 
   return (
     <div className="flex flex-col gap-6">
+      <section
+        className={`rounded-xl border p-4 transition-colors ${
+          chainDanger
+            ? "animate-pulse border-red-600 bg-red-950/60"
+            : chainLive
+              ? "border-emerald-800 bg-neutral-900"
+              : "border-neutral-800 bg-neutral-900"
+        }`}
+      >
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+          {chainLive ? (
+            <>
+              <span
+                className={`text-4xl font-black tabular-nums ${
+                  chainCritical
+                    ? "text-red-400"
+                    : chainDanger
+                      ? "text-amber-400"
+                      : "text-emerald-400"
+                }`}
+              >
+                {fmtClock(chainRemaining)}
+              </span>
+              <span className="text-sm text-neutral-400">
+                chain <span className="font-bold text-neutral-200">{me.chain.current.toLocaleString()}</span>
+                {me.chain.max > 0 && ` / ${me.chain.max.toLocaleString()}`}
+              </span>
+              {chainDanger && (
+                <span className="rounded bg-red-800 px-2 py-1 text-sm font-bold text-white">
+                  SAVE NEEDED
+                </span>
+              )}
+            </>
+          ) : (
+            <span className="text-sm text-neutral-400">
+              {me.chain.cooldown_s > 0 ? "Chain on cooldown" : "No chain running"}
+            </span>
+          )}
+          <button
+            onClick={() => {
+              const next = !sirenOn;
+              if (next) {
+                armAlarm();
+                playAlarm(false);
+              }
+              setSirenOn(next);
+            }}
+            className={`ml-auto rounded-md border px-3 py-1.5 text-xs font-semibold transition ${
+              sirenOn
+                ? "border-emerald-700 bg-emerald-950/50 text-emerald-300"
+                : "border-neutral-700 text-neutral-400 hover:text-neutral-200"
+            }`}
+          >
+            {sirenOn ? "🔊 Siren armed" : "🔇 Arm danger siren"}
+          </button>
+        </div>
+      </section>
+
+      {me.unavailable_state && (
+        <section className="rounded-xl border border-amber-700 bg-amber-950/40 p-4">
+          <p className="font-bold text-amber-300">
+            {me.unavailable_state === "Traveling"
+              ? "✈ You're flying — you can't save right now"
+              : `You're in ${me.unavailable_state} — you can't save right now`}
+          </p>
+          <p className="mt-1 text-sm text-neutral-400">
+            You keep your place in the queue, but the turn skips you and your pay clock is
+            paused until you&apos;re back.
+          </p>
+        </section>
+      )}
+
       {shift ? (
         <section className="rounded-xl border border-emerald-800 bg-emerald-950/40 p-6">
           <div className="flex items-center gap-2">

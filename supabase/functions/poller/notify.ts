@@ -21,7 +21,8 @@ export interface NotifyEvent {
     | "save_confirmed"
     | "missed_turn"
     | "chain_dropped"
-    | "saver_left";
+    | "saver_left"
+    | "milestone_near";
   title: string;
   body: string;
   url?: string;

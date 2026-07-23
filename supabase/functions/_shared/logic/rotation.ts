@@ -12,10 +12,17 @@ export interface ShiftLite {
   startedAt: number;
   /** unix seconds, null until the member performs a save this shift */
   lastSaveAt: number | null;
+  /**
+   * False while the member physically can't attack (flying, hospital, jail).
+   * They keep their shift and their place in line — they're just skipped for
+   * the turn until they're back. Undefined means available.
+   */
+  available?: boolean;
 }
 
 export function rotationOrder(shifts: ShiftLite[]): number[] {
   return shifts
+    .filter((s) => s.available !== false)
     .map((s) => ({
       id: s.memberId,
       key: Math.max(s.startedAt, s.lastSaveAt ?? s.startedAt),

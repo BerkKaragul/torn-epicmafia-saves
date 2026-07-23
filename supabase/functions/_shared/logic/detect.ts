@@ -27,6 +27,8 @@ export interface DetectorConfig {
   saveThresholdS: number;
   /** emit timer_low when the observed timer is at or below this */
   alertThresholdS: number;
+  /** start warning this many hits before a chain bonus milestone */
+  milestoneWarnHits: number;
   /** tolerance added to saveThresholdS to absorb API timing jitter */
   slackS: number;
 }
@@ -45,6 +47,14 @@ export type ChainEvent =
     }
   | { type: "timer_low"; chainId: number; current: number; timeoutS: number; episodeKey: string }
   | {
+      type: "milestone_near";
+      chainId: number;
+      current: number;
+      /** the upcoming bonus hit (25, 50, 100, 250, …) */
+      milestone: number;
+      hitsAway: number;
+    }
+  | {
       type: "chain_ended";
       chainId: number;
       finalCount: number;
@@ -54,9 +64,18 @@ export type ChainEvent =
 // Chain bonus milestones. Torn cools down after EVERY chain end (6s/hit),
 // so "did it complete?" cannot be read from the cooldown field — a chain
 // completed iff its final count sits exactly on a milestone.
-const MILESTONES = new Set([
+const MILESTONE_LIST = [
   10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000,
-]);
+];
+const MILESTONES = new Set(MILESTONE_LIST);
+
+/**
+ * Milestones worth interrupting people for. 10 is just chain establishment
+ * with a token bonus — warning about it would nag on every chain start.
+ */
+function nextBigMilestone(current: number): number | null {
+  return MILESTONE_LIST.find((m) => m > current && m >= 25) ?? null;
+}
 
 function isActive(o: ChainObservation): boolean {
   return o.chainId > 0 && o.current > 0 && o.cooldownS === 0;
@@ -121,6 +140,21 @@ export function detect(
         chainId: next.chainId,
         fromCount: 0,
         toCount: next.current,
+      });
+    }
+  }
+
+  if (nextActive) {
+    // Bonus hits (25, 50, 100, 250 …) pay a huge fixed respect chunk. Losing
+    // the chain just short of one is the worst outcome, so warn as it nears.
+    const milestone = nextBigMilestone(next.current);
+    if (milestone !== null && milestone - next.current <= cfg.milestoneWarnHits) {
+      events.push({
+        type: "milestone_near",
+        chainId: next.chainId,
+        current: next.current,
+        milestone,
+        hitsAway: milestone - next.current,
       });
     }
   }

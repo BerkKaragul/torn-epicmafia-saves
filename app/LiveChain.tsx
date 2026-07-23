@@ -4,13 +4,12 @@ import { useEffect, useRef, useState } from "react";
 import { supabaseBrowser } from "@/lib/supabase-browser";
 import type { StatePayload } from "@/lib/state";
 import { fmtClock } from "@/lib/format";
+import { alarmInterval, armAlarm, playAlarm } from "@/lib/alarm";
 
 export function LiveChain({ initial, myId }: { initial: StatePayload; myId: number }) {
   const [state, setState] = useState<StatePayload>(initial);
   const [nowS, setNowS] = useState(() => Math.floor(Date.now() / 1000));
   const [soundOn, setSoundOn] = useState(false);
-  const audioCtx = useRef<AudioContext | null>(null);
-  const lastBeep = useRef(0);
 
   // Realtime "poke" → re-fetch the authenticated /api/state. The public
   // channel carries no data, so a forged broadcast can waste a fetch but can
@@ -76,27 +75,13 @@ export function LiveChain({ initial, myId }: { initial: StatePayload; myId: numb
       : "ChainWatch — EPIC Mafia";
   }, [chainActive, remaining, state.chain.current]);
 
-  // danger beep (armed by the user toggle — browsers require a gesture)
+  // danger siren (armed by the user toggle — browsers require a gesture)
   useEffect(() => {
     if (!soundOn || !danger) return;
-    const now = Date.now();
-    if (now - lastBeep.current < 2000) return;
-    lastBeep.current = now;
-    try {
-      audioCtx.current ??= new AudioContext();
-      const ctx = audioCtx.current;
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.frequency.value = critical ? 1100 : 780;
-      gain.gain.setValueAtTime(0.18, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.35);
-      osc.connect(gain).connect(ctx.destination);
-      osc.start();
-      osc.stop(ctx.currentTime + 0.35);
-    } catch {
-      /* audio unavailable */
-    }
-  }, [soundOn, danger, critical, nowS]);
+    playAlarm(critical);
+    const id = setInterval(() => playAlarm(critical), alarmInterval(critical));
+    return () => clearInterval(id);
+  }, [soundOn, danger, critical]);
 
   return (
     <div className="flex flex-col gap-4">
@@ -160,14 +145,21 @@ export function LiveChain({ initial, myId }: { initial: StatePayload; myId: numb
 
       <div className="flex items-center justify-between">
         <button
-          onClick={() => setSoundOn((v) => !v)}
+          onClick={() => {
+            const next = !soundOn;
+            if (next) {
+              armAlarm();
+              playAlarm(false); // let them hear exactly what's coming
+            }
+            setSoundOn(next);
+          }}
           className={`rounded-md border px-3 py-1.5 text-sm font-medium transition ${
             soundOn
               ? "border-emerald-700 bg-emerald-950/50 text-emerald-300"
               : "border-neutral-700 text-neutral-400 hover:text-neutral-200"
           }`}
         >
-          {soundOn ? "🔊 Alarm armed" : "🔇 Arm alarm sound"}
+          {soundOn ? "🔊 Siren armed" : "🔇 Arm danger siren"}
         </button>
         <a
           href={`https://www.torn.com/factions.php?step=profile&ID=${state.faction_id}`}
@@ -216,10 +208,19 @@ export function LiveChain({ initial, myId }: { initial: StatePayload; myId: numb
                 <span className="font-medium">
                   {m.name}
                   {m.id === myId && <span className="ml-1.5 text-xs text-emerald-500">(you)</span>}
+                  {m.unavailable_state && (
+                    <span className="ml-2 rounded bg-amber-900/60 px-1.5 py-0.5 text-xs font-semibold text-amber-300">
+                      {m.unavailable_state === "Traveling"
+                        ? "✈ flying — can't save"
+                        : `${m.unavailable_state} — can't save`}
+                    </span>
+                  )}
                 </span>
                 <span className="ml-auto text-xs text-neutral-500">
                   on duty {fmtClock(Math.max(0, nowS - m.started_at))}
-                  {i === 0 && <span className="ml-2 font-semibold text-emerald-400">UP NEXT</span>}
+                  {i === 0 && !m.unavailable_state && (
+                    <span className="ml-2 font-semibold text-emerald-400">UP NEXT</span>
+                  )}
                 </span>
               </li>
             ))}

@@ -32,8 +32,13 @@ interface ActiveShiftRow {
   started_at: string;
   planned_minutes: number | null;
   last_save_at: string | null;
+  unavailable_state: string | null;
   members: MemberKeyRow;
 }
+
+// Torn states in which a member simply cannot land a save. "Abroad" is fine —
+// you can attack others in the same country.
+const BLOCKING_STATES = new Set(["Traveling", "Hospital", "Jail", "Federal"]);
 
 const MEMBER_KEY_COLS = "torn_id, name, api_key_ct, api_key_iv, key_valid, rate_limited_until";
 
@@ -46,6 +51,7 @@ interface PollerSettings {
   alert_threshold_s: number;
   per_save_bonus: number;
   save_bonus_mode: SaveBonusMode;
+  milestone_warn_hits: number;
 }
 
 function sb(): SupabaseClient {
@@ -141,7 +147,9 @@ export async function runPollCycle(): Promise<void> {
   try {
     const { data: activeShiftsRaw } = await db
       .from("shifts")
-      .select(`id, member_id, started_at, planned_minutes, last_save_at, members!inner(${MEMBER_KEY_COLS})`)
+      .select(
+        `id, member_id, started_at, planned_minutes, last_save_at, unavailable_state, members!inner(${MEMBER_KEY_COLS})`,
+      )
       .is("ended_at", null)
       .returns<ActiveShiftRow[]>();
     let activeShifts = activeShiftsRaw ?? [];
@@ -153,10 +161,17 @@ export async function runPollCycle(): Promise<void> {
       return;
     }
 
+    let pollerTorn: TornClient;
+    try {
+      pollerTorn = await tornFor(pollerMember);
+    } catch (e) {
+      console.error("could not build poller client:", e);
+      return;
+    }
+
     let chain;
     try {
-      const torn = await tornFor(pollerMember);
-      chain = await torn.factionChain();
+      chain = await pollerTorn.factionChain();
     } catch (e) {
       await db
         .from("poller_state")
@@ -193,10 +208,15 @@ export async function runPollCycle(): Promise<void> {
       });
     }
 
+    // who physically can't save right now (flying, hospital, jail) — must run
+    // before rotation is used for alerts / save ownership
+    activeShifts = await syncAvailability(db, activeShifts, pollerTorn);
+
     // ── run the detector and persist its events ──────────────────────────
     const events = detect(prevObs, obs, {
       saveThresholdS: settings.save_threshold_s,
       alertThresholdS: settings.alert_threshold_s,
+      milestoneWarnHits: settings.milestone_warn_hits,
       slackS: 5,
     });
 
@@ -238,6 +258,21 @@ export async function runPollCycle(): Promise<void> {
           },
           { onConflict: "torn_chain_id,chain_count", ignoreDuplicates: true },
         );
+      } else if (ev.type === "milestone_near") {
+        // one heads-up per milestone per chain, then a final shout when the
+        // very next hit is the bonus
+        const finalHit = ev.hitsAway <= 1;
+        await dispatch(db, activeShifts.map((s) => s.member_id), {
+          type: "milestone_near",
+          title: finalHit
+            ? `💎 NEXT HIT IS THE ${ev.milestone.toLocaleString()} BONUS`
+            : `💎 ${ev.hitsAway} hits to the ${ev.milestone.toLocaleString()} bonus`,
+          body: finalHit
+            ? `Do NOT let this chain drop — the ${ev.milestone.toLocaleString()} bonus is one hit away.`
+            : `Chain is at ${ev.current.toLocaleString()}. Losing it now costs the ${ev.milestone.toLocaleString()} bonus — stay sharp.`,
+          url: "/",
+          dedupKey: `milestone:${ev.chainId}:${ev.milestone}:${finalHit ? "final" : "near"}`,
+        });
       } else if (ev.type === "timer_low") {
         // two alert tiers per hit-episode: first crossing the threshold, and
         // a last-chance escalation at ≤45s if nobody has hit yet
@@ -717,7 +752,52 @@ function toShiftLites(shifts: ActiveShiftRow[]): ShiftLite[] {
     memberId: s.member_id,
     startedAt: toS(s.started_at),
     lastSaveAt: s.last_save_at ? toS(s.last_save_at) : null,
+    available: !s.unavailable_state,
   }));
+}
+
+/**
+ * Flying / hospitalised / jailed savers can't land a hit, so they're skipped
+ * for the turn and their pay clock stops (unavailable_periods drive billing).
+ * One faction/members call covers everyone on duty.
+ */
+async function syncAvailability(
+  db: SupabaseClient,
+  activeShifts: ActiveShiftRow[],
+  torn: TornClient,
+): Promise<ActiveShiftRow[]> {
+  if (activeShifts.length === 0) return activeShifts;
+  let roster;
+  try {
+    roster = await torn.factionMembers();
+  } catch (e) {
+    console.error("availability check failed:", e);
+    return activeShifts; // keep last known state rather than guessing
+  }
+  const stateById = new Map(roster.map((m) => [m.id, m.status?.state ?? "Okay"]));
+  const nowIso = new Date().toISOString();
+
+  for (const shift of activeShifts) {
+    const state = stateById.get(shift.member_id) ?? "Okay";
+    const blocked = BLOCKING_STATES.has(state) ? state : null;
+    if (blocked === shift.unavailable_state) continue;
+
+    // close any open period first so intervals stay disjoint (also covers
+    // Hospital → Traveling style transitions)
+    await db
+      .from("unavailable_periods")
+      .update({ ended_at: nowIso })
+      .eq("member_id", shift.member_id)
+      .is("ended_at", null);
+    if (blocked) {
+      await db
+        .from("unavailable_periods")
+        .insert({ member_id: shift.member_id, state: blocked });
+    }
+    await db.from("shifts").update({ unavailable_state: blocked }).eq("id", shift.id);
+    shift.unavailable_state = blocked;
+  }
+  return activeShifts;
 }
 
 /**

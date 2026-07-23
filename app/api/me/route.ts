@@ -39,7 +39,7 @@ export async function GET() {
       db().from("shifts").select("id", { count: "exact", head: true }).is("ended_at", null),
       db()
         .from("poller_state")
-        .select("last_chain_id, last_current, last_cooldown_s")
+        .select("last_chain_id, last_current, last_max, last_timeout_s, last_cooldown_s, last_poll_at")
         .eq("id", 1)
         .maybeSingle(),
     ]);
@@ -77,6 +77,18 @@ export async function GET() {
       saves_amount: Math.round(savesAmount),
     },
     chain_active: chainActive,
+    chain: {
+      id: pollerState?.last_chain_id ?? 0,
+      current: pollerState?.last_current ?? 0,
+      max: pollerState?.last_max ?? 0,
+      timeout_s: pollerState?.last_timeout_s ?? 0,
+      cooldown_s: pollerState?.last_cooldown_s ?? 0,
+      observed_at: pollerState?.last_poll_at
+        ? Math.floor(Date.parse(pollerState.last_poll_at) / 1000)
+        : 0,
+    },
+    alert_threshold_s: settings?.alert_threshold_s ?? 90,
+    unavailable_state: activeShift?.unavailable_state ?? null,
     missed_turns: missedTurns ?? 0,
     slots: { cap: settings?.saver_cap ?? 0, active: activeSavers ?? 0 },
   });

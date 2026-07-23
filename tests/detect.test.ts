@@ -5,7 +5,12 @@ import {
   type DetectorConfig,
 } from "../supabase/functions/_shared/logic/detect.ts";
 
-const cfg: DetectorConfig = { saveThresholdS: 90, alertThresholdS: 90, slackS: 5 };
+const cfg: DetectorConfig = {
+  saveThresholdS: 90,
+  alertThresholdS: 90,
+  milestoneWarnHits: 10,
+  slackS: 5,
+};
 
 const obs = (o: Partial<ChainObservation> = {}): ChainObservation => ({
   polledAt: 1000,
@@ -252,6 +257,50 @@ describe("detect: save candidates", () => {
       cfg,
     );
     expect(events.filter((e) => e.type === "save_candidate")).toHaveLength(0);
+  });
+});
+
+describe("detect: milestone warnings", () => {
+  const at = (current: number, prevCurrent = current - 1) =>
+    detect(
+      active({ polledAt: 1000, current: prevCurrent, timeoutS: 290 }),
+      active({ polledAt: 1015, current, timeoutS: 295 }),
+      cfg,
+    ).filter((e) => e.type === "milestone_near");
+
+  test("warns once the chain comes within the warning distance of a bonus hit", () => {
+    expect(at(15)).toEqual([
+      { type: "milestone_near", chainId: 777, current: 15, milestone: 25, hitsAway: 10 },
+    ]);
+  });
+
+  test("keeps warning as the chain closes in, with the countdown", () => {
+    expect(at(24)).toEqual([
+      { type: "milestone_near", chainId: 777, current: 24, milestone: 25, hitsAway: 1 },
+    ]);
+  });
+
+  test("stays quiet while the bonus is still far away", () => {
+    expect(at(14)).toEqual([]);
+  });
+
+  test("targets the NEXT bonus after one is banked", () => {
+    // 25 is banked; 50 is 25 hits away, still far
+    expect(at(25)).toEqual([]);
+    // ...and picks up again approaching 50
+    expect(at(41)).toEqual([
+      { type: "milestone_near", chainId: 777, current: 41, milestone: 50, hitsAway: 9 },
+    ]);
+  });
+
+  test("warns on the big milestones too", () => {
+    expect(at(995)).toEqual([
+      { type: "milestone_near", chainId: 777, current: 995, milestone: 1000, hitsAway: 5 },
+    ]);
+  });
+
+  test("says nothing when there is no live chain", () => {
+    expect(detect(obs({ polledAt: 1000 }), obs({ polledAt: 1015 }), cfg)).toEqual([]);
   });
 });
 

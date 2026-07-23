@@ -40,6 +40,7 @@ export interface ShiftRow {
   end_reason: "manual" | "planned_elapsed" | "admin" | "key_invalid" | null;
   hourly_rate_snapshot: number;
   last_save_at: string | null;
+  unavailable_state: string | null;
   payout_line_id: string | null;
 }
 

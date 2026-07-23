@@ -33,6 +33,7 @@ interface ActiveShiftRow {
   planned_minutes: number | null;
   last_save_at: string | null;
   unavailable_state: string | null;
+  hourly_rate_snapshot: number | string;
   members: MemberKeyRow;
 }
 
@@ -149,7 +150,7 @@ export async function runPollCycle(): Promise<void> {
     const { data: activeShiftsRaw } = await db
       .from("shifts")
       .select(
-        `id, member_id, started_at, planned_minutes, last_save_at, unavailable_state, members!inner(${MEMBER_KEY_COLS})`,
+        `id, member_id, started_at, planned_minutes, last_save_at, unavailable_state, hourly_rate_snapshot, members!inner(${MEMBER_KEY_COLS})`,
       )
       .is("ended_at", null)
       .returns<ActiveShiftRow[]>();
@@ -357,8 +358,12 @@ export async function runPollCycle(): Promise<void> {
     let rosterRefreshedAt = state.roster_refreshed_at;
     if (rosterAge > 600) {
       await refreshRoster(db, pollerMember, settings);
+      await syncWars(db, pollerTorn, settings.faction_id);
       rosterRefreshedAt = toIso(nowS);
     }
+
+    // pull Torn's per-member report for chains that have finished
+    await syncChainReports(db, pollerTorn);
 
     // ── poke clients when something changed (they re-fetch /api/state) ───
     const order = rotationOrder(toShiftLites(activeShifts));
@@ -451,11 +456,19 @@ async function accruePay(
   const eligible = activeShifts.filter((s) => !s.unavailable_state);
   if (eligible.length === 0) return;
 
-  const rows = eligible.map((s) => ({
-    id: s.id,
-    seconds: elapsed,
-    amount: (elapsed / 3600) * perSaverHourlyRate(Number(s.hourly_rate_snapshot), eligible.length),
-  }));
+  const rows = eligible
+    .map((s) => ({
+      id: s.id,
+      seconds: elapsed,
+      amount:
+        (elapsed / 3600) * perSaverHourlyRate(Number(s.hourly_rate_snapshot), eligible.length),
+    }))
+    // a NaN would serialise to null and blow up the whole batch insert
+    .filter((r) => Number.isFinite(r.amount));
+  if (rows.length !== eligible.length) {
+    console.error("skipped accrual rows with a non-numeric rate", { eligible: eligible.length });
+  }
+  if (rows.length === 0) return;
   const { error } = await db.rpc("accrue_shifts", { p_rows: rows });
   if (error) console.error("pay accrual failed:", error);
 }
@@ -764,6 +777,16 @@ async function refreshRoster(
         .not("torn_id", "in", `(${leaderIds.join(",")})`);
     }
 
+    // names for everyone, so war reports can label members who never signed in
+    await db.from("roster").upsert(
+      roster.map((m) => ({
+        torn_id: m.id,
+        name: m.name,
+        updated_at: new Date().toISOString(),
+      })),
+      { onConflict: "torn_id" },
+    );
+
     // members who left the faction lose their active shift
     const rosterIds = new Set(roster.map((m) => m.id));
     const { data: registered } = await db.from("members").select("torn_id, name");
@@ -782,6 +805,85 @@ async function refreshRoster(
     }
   } catch (e) {
     console.error("roster refresh failed:", e);
+  }
+}
+
+/** Keeps the ranked-war list current so reports can be scoped per war. */
+async function syncWars(
+  db: SupabaseClient,
+  torn: TornClient,
+  factionId: number,
+): Promise<void> {
+  try {
+    const wars = await torn.rankedWars();
+    const rows = wars.slice(0, 25).map((w) => {
+      const us = w.factions.find((f) => f.id === factionId) ?? w.factions[0];
+      const them = w.factions.find((f) => f.id !== us.id) ?? w.factions[1];
+      return {
+        torn_war_id: w.id,
+        opponent_id: them?.id ?? null,
+        opponent_name: them?.name ?? "unknown",
+        started_at: toIso(w.start),
+        ended_at: w.end ? toIso(w.end) : null,
+        target: w.target,
+        winner_id: w.winner,
+        our_score: us?.score ?? 0,
+        their_score: them?.score ?? 0,
+        updated_at: new Date().toISOString(),
+      };
+    });
+    if (rows.length) await db.from("wars").upsert(rows, { onConflict: "torn_war_id" });
+  } catch (e) {
+    console.error("war sync failed:", e);
+  }
+}
+
+/**
+ * Torn publishes a per-member breakdown once a chain ends (war hits, total
+ * attacks, overseas, bonus hits, respect). Pulled a few at a time so a backlog
+ * never blows the cycle budget.
+ */
+async function syncChainReports(db: SupabaseClient, torn: TornClient): Promise<void> {
+  const { data: pending } = await db
+    .from("chains")
+    .select("torn_chain_id")
+    .eq("report_synced", false)
+    .not("ended_at", "is", null)
+    .order("ended_at", { ascending: false })
+    .limit(2);
+  if (!pending?.length) return;
+
+  for (const row of pending) {
+    try {
+      const report = await torn.chainReport(row.torn_chain_id);
+      const contributions = (report.attackers ?? []).map((a) => ({
+        torn_chain_id: row.torn_chain_id,
+        member_id: a.id,
+        attacks_total: a.attacks.total,
+        attacks_war: a.attacks.war,
+        attacks_overseas: a.attacks.overseas,
+        retaliations: a.attacks.retaliations,
+        bonuses: a.attacks.bonuses,
+        respect: a.respect.total,
+      }));
+      if (contributions.length) {
+        await db
+          .from("chain_contributions")
+          .upsert(contributions, { onConflict: "torn_chain_id,member_id" });
+      }
+      await db
+        .from("chains")
+        .update({ report_synced: true })
+        .eq("torn_chain_id", row.torn_chain_id);
+    } catch (e) {
+      // a Limited key may not be allowed to read chain reports — don't retry
+      // this chain forever, just move on
+      console.error(`chain report ${row.torn_chain_id} failed:`, e);
+      await db
+        .from("chains")
+        .update({ report_synced: true })
+        .eq("torn_chain_id", row.torn_chain_id);
+    }
   }
 }
 

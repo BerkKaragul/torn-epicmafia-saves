@@ -8,7 +8,7 @@ export function Nav({
   isAdmin,
   name,
 }: {
-  current: "live" | "duty" | "admin" | "payouts";
+  current: "live" | "duty" | "admin" | "wars" | "payouts";
   isAdmin: boolean;
   name: string;
 }) {
@@ -37,6 +37,7 @@ export function Nav({
       {tab("live", "/", "Live chain")}
       {tab("duty", "/duty", "My duty")}
       {isAdmin && tab("admin", "/admin", "Admin")}
+      {isAdmin && tab("wars", "/admin/wars", "Wars")}
       {isAdmin && tab("payouts", "/admin/payouts", "Payouts")}
       <div className="ml-auto flex items-center gap-3 text-sm text-neutral-500">
         <span>{name}</span>

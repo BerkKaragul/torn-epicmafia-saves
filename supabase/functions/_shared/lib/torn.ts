@@ -77,6 +77,46 @@ export interface TornUserBasic {
   status: { description: string; state: string; color: string; until: number | null };
 }
 
+export interface TornRankedWar {
+  id: number;
+  start: number;
+  /** 0 while the war is still running */
+  end: number;
+  target: number;
+  winner: number | null;
+  factions: { id: number; name: string; score: number; chain: number }[];
+}
+
+export interface TornChainReportAttacker {
+  id: number;
+  respect: { total: number; average: number; best: number };
+  attacks: {
+    total: number;
+    leave: number;
+    mug: number;
+    hospitalize: number;
+    assists: number;
+    retaliations: number;
+    overseas: number;
+    draws: number;
+    escapes: number;
+    losses: number;
+    war: number;
+    bonuses: number;
+  };
+}
+
+export interface TornChainReport {
+  id: number;
+  faction_id: number;
+  start: number;
+  end: number;
+  details: Record<string, number>;
+  bonuses: { chain: number; attacker_id: number; defender_id: number; respect: number }[];
+  attackers: TornChainReportAttacker[];
+  non_attackers: number[];
+}
+
 export interface TornKeyInfo {
   access: { level: number; type: string; faction: boolean };
   user: { id: number; faction_id: number; company_id: number };
@@ -156,6 +196,12 @@ export function makeTornClient(opts: TornClientOptions) {
     factionChain: () => call<{ chain: TornChain }>("/faction/chain").then((r) => r.chain),
     factionMembers: () =>
       call<{ members: TornFactionMember[] }>("/faction/members").then((r) => r.members),
+    rankedWars: () =>
+      call<{ rankedwars: TornRankedWar[] }>("/faction/rankedwars").then((r) => r.rankedwars),
+    chainReport: (chainId: number) =>
+      call<{ chainreport: TornChainReport }>(`/faction/${chainId}/chainreport`).then(
+        (r) => r.chainreport,
+      ),
     userAttacks: (params: { from?: number; to?: number; limit?: number; sort?: "asc" | "desc" }) =>
       call<{ attacks: TornAttack[] }>("/user/attacks", {
         ...(params.from !== undefined ? { from: params.from } : {}),

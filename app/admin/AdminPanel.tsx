@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { fmtMoney } from "@/lib/format";
 
 interface Settings {
   saving_enabled: boolean;
@@ -35,23 +36,80 @@ interface AdminSave {
   members: { name: string } | null;
 }
 
+interface Balance {
+  member_id: number;
+  name: string;
+  duty_seconds: number;
+  duty_amount: number;
+  save_count: number;
+  saves_amount: number;
+  adjustments_amount: number;
+  total_amount: number;
+}
+
 export function AdminPanel() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [members, setMembers] = useState<AdminMember[]>([]);
   const [saves, setSaves] = useState<AdminSave[]>([]);
+  const [balances, setBalances] = useState<Balance[]>([]);
   const [msg, setMsg] = useState<string | null>(null);
   const [attrTarget, setAttrTarget] = useState<Record<string, string>>({});
+  const [adjFor, setAdjFor] = useState<number | null>(null);
+  const [adjAmount, setAdjAmount] = useState("");
+  const [adjNote, setAdjNote] = useState("");
 
   const load = useCallback(async () => {
-    const [s, m, sv] = await Promise.all([
+    const [s, m, sv, b] = await Promise.all([
       fetch("/api/admin/settings").then((r) => r.json()),
       fetch("/api/admin/members").then((r) => r.json()),
       fetch("/api/admin/saves").then((r) => r.json()),
+      fetch("/api/admin/balances").then((r) => r.json()),
     ]);
     if (s.settings) setSettings(s.settings);
     if (m.members) setMembers(m.members);
     if (sv.saves) setSaves(sv.saves);
+    if (b.balances) setBalances(b.balances);
   }, []);
+
+  async function settle(memberId: number, name: string, paid: boolean, total: number) {
+    const what = paid
+      ? `Mark ${fmtMoney(total)} as PAID to ${name}? Do this once you've actually sent the money in Torn.`
+      : `Wipe ${name}'s ${fmtMoney(total)} balance WITHOUT paying? This can't be undone.`;
+    if (!confirm(what)) return;
+    setMsg(null);
+    const res = await fetch("/api/admin/balances", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ member_id: memberId, paid }),
+    });
+    const body = await res.json();
+    setMsg(
+      res.ok
+        ? `${name}: ${fmtMoney(body.settled)} ${paid ? "marked paid" : "written off"}.`
+        : body.error,
+    );
+    await load();
+  }
+
+  async function submitAdjustment(e: React.FormEvent) {
+    e.preventDefault();
+    setMsg(null);
+    const res = await fetch("/api/admin/balances", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        member_id: adjFor,
+        amount: Number(adjAmount),
+        note: adjNote,
+      }),
+    });
+    const body = await res.json();
+    if (!res.ok) setMsg(body.error);
+    setAdjFor(null);
+    setAdjAmount("");
+    setAdjNote("");
+    await load();
+  }
 
   useEffect(() => {
     load();
@@ -247,6 +305,143 @@ export function AdminPanel() {
           Save settings
         </button>
       </form>
+
+      <section className="rounded-xl border border-neutral-800 bg-neutral-900 p-5">
+        <div className="flex flex-wrap items-baseline gap-3">
+          <h2 className="font-bold">Balances owed</h2>
+          <span className="text-sm text-neutral-500">
+            {fmtMoney(balances.reduce((sum, b) => sum + Number(b.total_amount), 0))} outstanding
+            across {balances.filter((b) => Number(b.total_amount) !== 0).length} member(s)
+          </span>
+        </div>
+        <p className="mt-1 text-xs text-neutral-500">
+          Live totals — duty pay accrues every 15s while a chain is live. Pay people in Torn
+          first, then hit “paid” to zero their balance here. Balances keep counting even while
+          someone is still on duty.
+        </p>
+
+        <div className="mt-3 overflow-x-auto">
+          <table className="w-full text-left text-sm">
+            <thead className="text-xs uppercase text-neutral-500">
+              <tr>
+                <th className="py-1.5 pr-3">Member</th>
+                <th className="py-1.5 pr-3">Duty</th>
+                <th className="py-1.5 pr-3">Saves</th>
+                <th className="py-1.5 pr-3">Adjust</th>
+                <th className="py-1.5 pr-3">Owed</th>
+                <th className="py-1.5" />
+              </tr>
+            </thead>
+            <tbody>
+              {balances
+                .filter((b) => Number(b.total_amount) !== 0 || b.save_count > 0)
+                .map((b) => (
+                  <tr key={b.member_id} className="border-t border-neutral-800">
+                    <td className="py-2 pr-3 font-medium">{b.name}</td>
+                    <td className="py-2 pr-3 tabular-nums text-neutral-400">
+                      {fmtMoney(b.duty_amount)}
+                      <span className="ml-1 text-xs text-neutral-600">
+                        ({(b.duty_seconds / 3600).toFixed(1)}h)
+                      </span>
+                    </td>
+                    <td className="py-2 pr-3 tabular-nums text-neutral-400">
+                      {fmtMoney(b.saves_amount)}
+                      <span className="ml-1 text-xs text-neutral-600">({b.save_count})</span>
+                    </td>
+                    <td
+                      className={`py-2 pr-3 tabular-nums ${
+                        Number(b.adjustments_amount) < 0
+                          ? "text-red-400"
+                          : Number(b.adjustments_amount) > 0
+                            ? "text-emerald-400"
+                            : "text-neutral-600"
+                      }`}
+                    >
+                      {Number(b.adjustments_amount) !== 0
+                        ? fmtMoney(b.adjustments_amount)
+                        : "—"}
+                    </td>
+                    <td className="py-2 pr-3 font-bold tabular-nums">
+                      {fmtMoney(b.total_amount)}
+                    </td>
+                    <td className="py-2">
+                      <div className="flex flex-wrap justify-end gap-1.5">
+                        <button
+                          onClick={() => setAdjFor(adjFor === b.member_id ? null : b.member_id)}
+                          className="rounded bg-neutral-800 px-2 py-0.5 text-xs font-semibold text-neutral-300 hover:bg-neutral-700"
+                        >
+                          ± adjust
+                        </button>
+                        <button
+                          onClick={() =>
+                            settle(b.member_id, b.name, true, Number(b.total_amount))
+                          }
+                          className="rounded bg-emerald-800 px-2 py-0.5 text-xs font-semibold text-emerald-100 hover:bg-emerald-700"
+                        >
+                          mark paid
+                        </button>
+                        <button
+                          onClick={() =>
+                            settle(b.member_id, b.name, false, Number(b.total_amount))
+                          }
+                          className="rounded bg-red-900/70 px-2 py-0.5 text-xs font-semibold text-red-300 hover:bg-red-900"
+                        >
+                          wipe
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+            </tbody>
+          </table>
+        </div>
+
+        {adjFor !== null && (
+          <form
+            onSubmit={submitAdjustment}
+            className="mt-4 rounded-lg border border-neutral-700 bg-neutral-950 p-3"
+          >
+            <p className="text-sm font-medium">
+              Adjust balance for{" "}
+              {balances.find((b) => b.member_id === adjFor)?.name ??
+                members.find((m) => m.torn_id === adjFor)?.name}
+            </p>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <input
+                type="number"
+                value={adjAmount}
+                onChange={(e) => setAdjAmount(e.target.value)}
+                placeholder="e.g. 5000000 or -2000000"
+                className="w-56 rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1.5 text-sm"
+              />
+              <input
+                value={adjNote}
+                onChange={(e) => setAdjNote(e.target.value)}
+                maxLength={200}
+                placeholder="reason (shown in the payout record)"
+                className="min-w-[16rem] flex-1 rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1.5 text-sm"
+              />
+              <button
+                type="submit"
+                disabled={!adjAmount || Number(adjAmount) === 0}
+                className="rounded-md bg-emerald-600 px-4 py-1.5 text-sm font-semibold text-white hover:bg-emerald-500 disabled:opacity-40"
+              >
+                Apply
+              </button>
+              <button
+                type="button"
+                onClick={() => setAdjFor(null)}
+                className="rounded-md border border-neutral-700 px-3 py-1.5 text-sm text-neutral-300 hover:bg-neutral-800"
+              >
+                Cancel
+              </button>
+            </div>
+            <p className="mt-1.5 text-xs text-neutral-500">
+              Positive adds money to what they&apos;re owed, negative takes it away.
+            </p>
+          </form>
+        )}
+      </section>
 
       {needsAttention.length > 0 && (
         <section className="rounded-xl border border-amber-800 bg-amber-950/30 p-5">

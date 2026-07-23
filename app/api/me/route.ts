@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { sessionMember, unauthorized } from "@/lib/session";
+import { perSaverHourlyRate } from "@/supabase/functions/_shared/logic/pay";
 import type { SaveRow, SettingsRow, ShiftRow } from "@/lib/types";
 
 export async function GET() {
@@ -14,6 +15,7 @@ export async function GET() {
     { data: mySaves },
     { count: missedTurns },
     { count: activeSavers },
+    { count: eligibleSavers },
     { data: pollerState },
   ] = await Promise.all([
       db()
@@ -37,6 +39,11 @@ export async function GET() {
         .select("id", { count: "exact", head: true })
         .eq("member_id", member.torn_id),
       db().from("shifts").select("id", { count: "exact", head: true }).is("ended_at", null),
+      db()
+        .from("shifts")
+        .select("id", { count: "exact", head: true })
+        .is("ended_at", null)
+        .is("unavailable_state", null),
       db()
         .from("poller_state")
         .select("last_chain_id, last_current, last_max, last_timeout_s, last_cooldown_s, last_poll_at")
@@ -68,8 +75,15 @@ export async function GET() {
           hourly_rate: settings.hourly_rate,
           per_save_bonus: settings.per_save_bonus,
           save_bonus_mode: settings.save_bonus_mode,
+          // what each active saver actually earns per hour at the moment
+          current_hourly_rate: perSaverHourlyRate(
+            Number(settings.hourly_rate),
+            eligibleSavers ?? 0,
+          ),
+          eligible_savers: eligibleSavers ?? 0,
         }
       : null,
+    saving_enabled: settings?.saving_enabled ?? true,
     unpaid: {
       duty_seconds: Number(duty.duty_seconds),
       hours_amount: Number(duty.hours_amount),

@@ -33,7 +33,7 @@ export async function PATCH(req: Request) {
     return NextResponse.json({ error: "Bad request" }, { status: 400 });
   }
 
-  const patch: Record<string, number | string> = {};
+  const patch: Record<string, number | string | boolean> = {};
   for (const key of EDITABLE) {
     if (body[key] == null) continue;
     const n = Number(body[key]);
@@ -41,6 +41,16 @@ export async function PATCH(req: Request) {
       return NextResponse.json({ error: `Invalid value for ${key}` }, { status: 400 });
     }
     patch[key] = n;
+  }
+  if (typeof body.saving_enabled === "boolean") {
+    patch.saving_enabled = body.saving_enabled;
+    if (!body.saving_enabled) {
+      // switching saving off ends every shift so nothing keeps accruing
+      await db()
+        .from("shifts")
+        .update({ ended_at: new Date().toISOString(), end_reason: "saving_disabled" })
+        .is("ended_at", null);
+    }
   }
   if (typeof body.save_bonus_mode === "string") {
     if (!["flat", "scaled"].includes(body.save_bonus_mode)) {

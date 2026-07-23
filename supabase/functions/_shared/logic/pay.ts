@@ -8,6 +8,20 @@
 
 export type SaveBonusMode = "flat" | "scaled";
 
+/**
+ * Availability pay per saver, given how many are actively on duty right now.
+ *
+ * One or two savers each earn the full posted rate — two people watching is
+ * worth paying for outright. From three up, the faction spends a fixed pool of
+ * double the posted rate, split evenly, so extra volunteers dilute the share
+ * rather than inflating the bill.
+ */
+export function perSaverHourlyRate(baseRate: number, saverCount: number): number {
+  if (saverCount <= 0) return 0;
+  if (saverCount <= 2) return baseRate;
+  return (2 * baseRate) / saverCount;
+}
+
 export function saveBonus(mode: SaveBonusMode, base: number, chainCount: number): number {
   if (mode === "scaled") {
     return Math.round(base * Math.max(1, chainCount / 100));

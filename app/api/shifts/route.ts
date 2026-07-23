@@ -40,6 +40,12 @@ export async function POST(req: Request) {
     console.error("shift start failed", error);
     return NextResponse.json({ error: "Could not start shift." }, { status: 500 });
   }
+  if (data?.error === "disabled") {
+    return NextResponse.json(
+      { error: "Saving is switched off by the admins right now." },
+      { status: 409 },
+    );
+  }
   if (data?.error === "full") {
     return NextResponse.json(
       {

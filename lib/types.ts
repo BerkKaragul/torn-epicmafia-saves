@@ -28,6 +28,8 @@ export interface SettingsRow {
   poller_member_id: number | null;
   saver_cap: number;
   save_bonus_mode: "flat" | "scaled";
+  saving_enabled: boolean;
+  milestone_warn_hits: number;
   updated_at: string;
 }
 

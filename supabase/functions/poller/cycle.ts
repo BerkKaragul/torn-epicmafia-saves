@@ -4,7 +4,7 @@
 import { createClient, type SupabaseClient } from "npm:@supabase/supabase-js@2";
 import { detect, type ChainEvent, type ChainObservation } from "../_shared/logic/detect.ts";
 import { rotationOrder, type ShiftLite } from "../_shared/logic/rotation.ts";
-import { saveBonus, type SaveBonusMode } from "../_shared/logic/pay.ts";
+import { perSaverHourlyRate, saveBonus, type SaveBonusMode } from "../_shared/logic/pay.ts";
 import { decryptApiKey } from "../_shared/lib/crypto.ts";
 import {
   isInvalidKeyError,
@@ -52,6 +52,7 @@ interface PollerSettings {
   per_save_bonus: number;
   save_bonus_mode: SaveBonusMode;
   milestone_warn_hits: number;
+  saving_enabled: boolean;
 }
 
 function sb(): SupabaseClient {
@@ -292,6 +293,10 @@ export async function runPollCycle(): Promise<void> {
       }
     }
 
+    // ── accrue availability pay for this slice of time ───────────────────
+    const lastAccrualS = state.last_accrual_at ? toS(state.last_accrual_at) : nowS;
+    await accruePay(db, activeShifts, settings, obsActive, nowS, lastAccrualS);
+
     // ── attribute pending saves via on-duty members' own attack logs ─────
     activeShifts = await attributePendingSaves(db, activeShifts, settings, nowS);
 
@@ -376,6 +381,7 @@ export async function runPollCycle(): Promise<void> {
         consecutive_errors: 0,
         danger_episode_key: dangerEpisodeKey,
         roster_refreshed_at: rosterRefreshedAt,
+        last_accrual_at: toIso(nowS),
         ...(shouldPoke
           ? { last_broadcast_fingerprint: fingerprint, last_broadcast_at: toIso(nowS) }
           : {}),
@@ -420,6 +426,38 @@ async function pickPollerMember(
     .limit(1)
     .maybeSingle<MemberKeyRow>();
   return fallback ?? null;
+}
+
+/**
+ * Credits availability pay for the slice of time since the last accrual.
+ *
+ * Paid only while a chain is live, saving is enabled, and the saver can
+ * actually attack. The per-saver rate depends on how many are eligible RIGHT
+ * NOW (1-2 → full rate each, 3+ → a doubled pool split evenly), which is why
+ * this accrues continuously instead of being derived from the shift span.
+ */
+async function accruePay(
+  db: SupabaseClient,
+  activeShifts: ActiveShiftRow[],
+  settings: PollerSettings,
+  chainLive: boolean,
+  nowS: number,
+  lastAccrualS: number,
+): Promise<void> {
+  // never credit a long poller outage as if it had been watched
+  const elapsed = Math.min(Math.max(0, nowS - lastAccrualS), settings.poll_interval_s * 3);
+  if (elapsed <= 0 || !chainLive || !settings.saving_enabled) return;
+
+  const eligible = activeShifts.filter((s) => !s.unavailable_state);
+  if (eligible.length === 0) return;
+
+  const rows = eligible.map((s) => ({
+    id: s.id,
+    seconds: elapsed,
+    amount: (elapsed / 3600) * perSaverHourlyRate(Number(s.hourly_rate_snapshot), eligible.length),
+  }));
+  const { error } = await db.rpc("accrue_shifts", { p_rows: rows });
+  if (error) console.error("pay accrual failed:", error);
 }
 
 async function attributePendingSaves(

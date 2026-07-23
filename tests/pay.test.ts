@@ -1,5 +1,33 @@
 import { describe, expect, test } from "vitest";
-import { saveBonus } from "../supabase/functions/_shared/logic/pay.ts";
+import { perSaverHourlyRate, saveBonus } from "../supabase/functions/_shared/logic/pay.ts";
+
+describe("perSaverHourlyRate", () => {
+  const R = 3_000_000;
+
+  test("a lone saver earns the full posted rate", () => {
+    expect(perSaverHourlyRate(R, 1)).toBe(3_000_000);
+  });
+
+  test("two savers each earn the full rate (no split at two)", () => {
+    expect(perSaverHourlyRate(R, 2)).toBe(3_000_000);
+  });
+
+  test("three or more split a pool of double the posted rate", () => {
+    expect(perSaverHourlyRate(R, 3)).toBe(2_000_000);
+    expect(perSaverHourlyRate(R, 5)).toBe(1_200_000);
+    expect(perSaverHourlyRate(R, 6)).toBe(1_000_000);
+  });
+
+  test("the pool never exceeds double the posted rate once split", () => {
+    for (const n of [3, 4, 8, 20]) {
+      expect(perSaverHourlyRate(R, n) * n).toBe(2 * R);
+    }
+  });
+
+  test("nobody on duty costs nothing", () => {
+    expect(perSaverHourlyRate(R, 0)).toBe(0);
+  });
+});
 
 describe("saveBonus", () => {
   test("flat mode pays the base regardless of chain size", () => {

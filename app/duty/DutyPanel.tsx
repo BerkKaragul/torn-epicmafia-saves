@@ -18,7 +18,10 @@ interface Me {
     hourly_rate: number;
     per_save_bonus: number;
     save_bonus_mode: "flat" | "scaled";
+    current_hourly_rate: number;
+    eligible_savers: number;
   } | null;
+  saving_enabled: boolean;
   unpaid: { duty_seconds: number; hours_amount: number; save_count: number; saves_amount: number };
   chain_active: boolean;
   chain: {
@@ -206,6 +209,16 @@ export function DutyPanel() {
         </div>
       </section>
 
+      {!me.saving_enabled && (
+        <section className="rounded-xl border border-red-800 bg-red-950/40 p-4">
+          <p className="font-bold text-red-300">Saving is switched off right now</p>
+          <p className="mt-1 text-sm text-neutral-400">
+            The admins have paused saver duty — you can&apos;t enlist and no pay accrues until
+            it&apos;s turned back on.
+          </p>
+        </section>
+      )}
+
       {me.unavailable_state && (
         <section className="rounded-xl border border-amber-700 bg-amber-950/40 p-4">
           <p className="font-bold text-amber-300">
@@ -228,7 +241,14 @@ export function DutyPanel() {
           </div>
           <p className="mt-3 text-4xl font-bold tabular-nums">{fmtDuration(elapsedS)}</p>
           <p className="mt-1 text-sm text-neutral-400">
-            on duty · {fmtMoney(shift.hourly_rate_snapshot)}/h while a chain is live
+            on duty · {fmtMoney(me.rates?.current_hourly_rate ?? 0)}/h right now
+            {(me.rates?.eligible_savers ?? 0) > 2 && (
+              <span className="text-amber-400">
+                {" "}
+                (split {me.rates?.eligible_savers} ways)
+              </span>
+            )}{" "}
+            while a chain is live
             {remainingS !== null && (
               <> · auto-ends in <span className="tabular-nums">{fmtDuration(remainingS)}</span></>
             )}
@@ -304,7 +324,8 @@ export function DutyPanel() {
             )}
           </h2>
           <p className="mt-1 text-sm text-neutral-400">
-            Current rate: {fmtMoney(me.rates?.hourly_rate ?? 0)}/hour on duty +{" "}
+            Posted rate: {fmtMoney(me.rates?.hourly_rate ?? 0)}/hour (1–2 savers get it in full;
+            3+ share double that) +{" "}
             {fmtMoney(me.rates?.per_save_bonus ?? 0)} per save
             {me.rates?.save_bonus_mode === "scaled" && (
               <span className="text-amber-400"> (scales with chain size — ×chain/100)</span>
@@ -332,7 +353,11 @@ export function DutyPanel() {
             </select>
             <button
               onClick={startShift}
-              disabled={busy || (me.slots.cap > 0 && me.slots.active >= me.slots.cap)}
+              disabled={
+                busy ||
+                !me.saving_enabled ||
+                (me.slots.cap > 0 && me.slots.active >= me.slots.cap)
+              }
               className="rounded-md bg-emerald-600 px-5 py-2 font-semibold text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"
             >
               I can save — start

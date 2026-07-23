@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 interface Settings {
+  saving_enabled: boolean;
   hourly_rate: number;
   per_save_bonus: number;
   save_bonus_mode: "flat" | "scaled";
@@ -101,6 +102,53 @@ export function AdminPanel() {
   return (
     <div className="flex flex-col gap-6">
       {msg && <p className="text-sm text-amber-300">{msg}</p>}
+
+      <section
+        className={`rounded-xl border p-5 ${
+          settings.saving_enabled
+            ? "border-emerald-800 bg-emerald-950/30"
+            : "border-red-800 bg-red-950/40"
+        }`}
+      >
+        <div className="flex flex-wrap items-center gap-4">
+          <div>
+            <h2 className="font-bold">
+              {settings.saving_enabled ? "Saving is ON" : "Saving is OFF"}
+            </h2>
+            <p className="mt-1 text-xs text-neutral-400">
+              {settings.saving_enabled
+                ? "Members can enlist as savers and availability pay is accruing."
+                : "Nobody can enlist and no pay accrues. Turn it on when you're chaining again."}
+            </p>
+          </div>
+          <button
+            onClick={async () => {
+              const next = !settings.saving_enabled;
+              if (
+                !next &&
+                !confirm("Turn saving OFF? This ends everyone's active shift immediately.")
+              )
+                return;
+              setMsg(null);
+              const res = await fetch("/api/admin/settings", {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ saving_enabled: next }),
+              });
+              const body = await res.json();
+              if (!res.ok) setMsg(body.error);
+              await load();
+            }}
+            className={`ml-auto rounded-md px-5 py-2.5 font-bold text-white transition ${
+              settings.saving_enabled
+                ? "bg-red-700 hover:bg-red-600"
+                : "bg-emerald-600 hover:bg-emerald-500"
+            }`}
+          >
+            {settings.saving_enabled ? "Turn saving OFF" : "Turn saving ON"}
+          </button>
+        </div>
+      </section>
 
       <form
         onSubmit={saveSettings}

@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 import { sessionMember } from "@/lib/session";
 import { WarsPanel } from "./WarsPanel";
 import { Nav } from "../../Nav";
+import { ChainTimerBar } from "../../ChainTimerBar";
 
 export default async function WarsPage() {
   const member = await sessionMember();
@@ -11,6 +12,9 @@ export default async function WarsPage() {
   return (
     <main className="mx-auto max-w-4xl px-4 py-6">
       <Nav current="wars" isAdmin name={member.name} />
+      <div className="mb-6">
+        <ChainTimerBar />
+      </div>
       <WarsPanel />
     </main>
   );

@@ -8,8 +8,6 @@ interface War {
   opponent_name: string;
   started_at: string;
   ended_at: string | null;
-  our_score: number;
-  their_score: number;
 }
 
 interface ReportRow {
@@ -23,27 +21,30 @@ interface ReportRow {
 }
 
 interface Config {
+  pool: number;
   warHit: number;
   outsideHit: number;
   bonusHit: number;
   save: number;
-  hourly: number;
+  duty: number;
   includeOutside: boolean;
   includeDuty: boolean;
 }
 
 const DEFAULT: Config = {
-  warHit: 0,
-  outsideHit: 0,
-  bonusHit: 0,
-  save: 0,
-  hourly: 0,
+  pool: 0,
+  warHit: 0.3,
+  outsideHit: 0.5,
+  bonusHit: 1,
+  save: 0.4,
+  duty: 0.2,
   includeOutside: true,
   includeDuty: true,
 };
 
 const fmtDate = (iso: string) =>
   new Date(iso).toLocaleDateString(undefined, { dateStyle: "medium" });
+const fmtPts = (n: number) => n.toLocaleString(undefined, { maximumFractionDigits: 1 });
 
 export function WarPayoutPanel() {
   const [wars, setWars] = useState<War[]>([]);
@@ -54,7 +55,6 @@ export function WarPayoutPanel() {
   const [msg, setMsg] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  // initial: config + war list
   useEffect(() => {
     fetch("/api/admin/war-payout")
       .then((r) => r.json())
@@ -81,26 +81,49 @@ export function WarPayoutPanel() {
     if (selected) loadReport(selected);
   }, [selected, loadReport]);
 
-  const num = (k: keyof Config) => (v: string) =>
+  const setNum = (k: keyof Config) => (v: string) =>
     setConfig((c) => ({ ...c, [k]: v === "" ? 0 : Number(v) }));
 
-  // per-member computed earnings
-  const rows = useMemo(() => {
-    return report
-      .map((r) => {
-        const warHits = config.warHit * Number(r.war_hits);
-        const outside = config.includeOutside ? config.outsideHit * Number(r.outside_hits) : 0;
-        const bonus = config.bonusHit * Number(r.bonus_hits);
-        const saves = config.save * Number(r.saves);
-        const duty = config.includeDuty ? (config.hourly * Number(r.save_seconds)) / 3600 : 0;
-        const total = Math.round(warHits + outside + bonus + saves + duty);
-        return { ...r, warHits, outside, bonus, saves, duty, total };
-      })
-      .filter((r) => r.total > 0 || r.war_hits > 0 || r.saves > 0)
-      .sort((a, b) => b.total - a.total);
+  // points per member, then split the pool proportionally. Uses largest-
+  // remainder so the shares sum EXACTLY to the pool (no lost/created cents).
+  const { rows, totalPoints, distributed } = useMemo(() => {
+    const scored = report.map((r) => {
+      const dutyHours = Number(r.save_seconds) / 3600;
+      const points =
+        config.warHit * Number(r.war_hits) +
+        (config.includeOutside ? config.outsideHit * Number(r.outside_hits) : 0) +
+        config.bonusHit * Number(r.bonus_hits) +
+        config.save * Number(r.saves) +
+        (config.includeDuty ? config.duty * dutyHours : 0);
+      return { ...r, dutyHours, points };
+    });
+
+    const total = scored.reduce((s, r) => s + r.points, 0);
+    const pool = Math.max(0, Math.round(config.pool));
+
+    let withShares = scored.map((r) => ({ ...r, share: 0, exact: 0, floor: 0 }));
+    if (total > 0 && pool > 0) {
+      withShares = scored.map((r) => {
+        const exact = (r.points / total) * pool;
+        return { ...r, exact, floor: Math.floor(exact), share: Math.floor(exact) };
+      });
+      let leftover = pool - withShares.reduce((s, r) => s + r.floor, 0);
+      // hand the rounding remainder to the biggest fractional parts first
+      const order = [...withShares]
+        .map((r, i) => ({ i, frac: r.exact - r.floor }))
+        .sort((a, b) => b.frac - a.frac);
+      for (let j = 0; j < leftover; j++) withShares[order[j % order.length].i].share += 1;
+    }
+
+    return {
+      rows: withShares
+        .filter((r) => r.points > 0)
+        .sort((a, b) => b.share - a.share || b.points - a.points),
+      totalPoints: total,
+      distributed: withShares.reduce((s, r) => s + r.share, 0),
+    };
   }, [report, config]);
 
-  const grandTotal = rows.reduce((s, r) => s + r.total, 0);
   const dirty = JSON.stringify(config) !== JSON.stringify(savedConfig);
 
   async function saveDefaults() {
@@ -113,7 +136,7 @@ export function WarPayoutPanel() {
     const b = await res.json();
     if (res.ok) {
       setSavedConfig(config);
-      setMsg("Saved as the default weights.");
+      setMsg("Saved as defaults.");
     } else setMsg(b.error);
   }
 
@@ -121,7 +144,7 @@ export function WarPayoutPanel() {
     const war = wars.find((w) => String(w.torn_war_id) === selected);
     const tag = war ? war.opponent_name.replace(/[^a-z0-9]+/gi, "-") : "all";
     const lines = [
-      "member,war_hits,outside_hits,bonus_hits,saves,duty_hours,total",
+      "member,war_hits,outside_hits,bonus_hits,saves,duty_hours,points,share",
       ...rows.map((r) =>
         [
           `"${r.name}"`,
@@ -129,8 +152,9 @@ export function WarPayoutPanel() {
           r.outside_hits,
           r.bonus_hits,
           r.saves,
-          (Number(r.save_seconds) / 3600).toFixed(2),
-          r.total,
+          r.dutyHours.toFixed(2),
+          r.points.toFixed(2),
+          r.share,
         ].join(","),
       ),
     ];
@@ -149,11 +173,40 @@ export function WarPayoutPanel() {
       <input
         type="number"
         min={0}
+        step={0.1}
         value={config[k] as number}
-        onChange={(e) => num(k)(e.target.value)}
+        onChange={(e) => setNum(k)(e.target.value)}
         className="mt-1 w-full rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1.5 tabular-nums"
       />
       {hint && <span className="mt-0.5 block text-xs text-neutral-600">{hint}</span>}
+    </label>
+  );
+
+  const togglableWeight = (
+    label: string,
+    k: keyof Config,
+    toggleKey: "includeOutside" | "includeDuty",
+    hint: string,
+  ) => (
+    <label className="text-sm">
+      <span className="flex items-center gap-2 text-neutral-400">
+        <input
+          type="checkbox"
+          checked={config[toggleKey]}
+          onChange={(e) => setConfig((c) => ({ ...c, [toggleKey]: e.target.checked }))}
+        />
+        {label}
+      </span>
+      <input
+        type="number"
+        min={0}
+        step={0.1}
+        value={config[k] as number}
+        disabled={!config[toggleKey]}
+        onChange={(e) => setNum(k)(e.target.value)}
+        className="mt-1 w-full rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1.5 tabular-nums disabled:opacity-40"
+      />
+      <span className="mt-0.5 block text-xs text-neutral-600">{hint}</span>
     </label>
   );
 
@@ -162,70 +215,52 @@ export function WarPayoutPanel() {
       <section className="rounded-xl border border-neutral-800 bg-neutral-900 p-5">
         <h2 className="font-bold">War payout calculator</h2>
         <p className="mt-1 text-xs text-neutral-500">
-          Turns each member&apos;s war stats into a suggested payout using the weights below. This
-          is a calculator for the bankers — it doesn&apos;t move money or touch the live Balances
-          page. Pay people in Torn, then settle their balances as usual.
+          Enter the total prize pool for the war. The weights below turn each stat into points
+          (they don&apos;t need to add up to anything); everyone gets a share of the pool
+          proportional to their points. Shares always add up to exactly the pool.
         </p>
-        <div className="mt-3 flex flex-wrap items-center gap-3">
-          <select
-            value={selected ?? ""}
-            onChange={(e) => setSelected(e.target.value)}
-            className="rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 text-sm"
-          >
-            {wars.map((w) => (
-              <option key={w.torn_war_id} value={w.torn_war_id}>
-                {w.ended_at ? "" : "🔴 LIVE — "}vs {w.opponent_name} ({fmtDate(w.started_at)})
-              </option>
-            ))}
-            <option value="all">All time (every chain)</option>
-          </select>
+
+        <div className="mt-4 flex flex-wrap items-end gap-4">
+          <label className="text-sm">
+            <span className="text-neutral-400">Total pool ($)</span>
+            <input
+              type="number"
+              min={0}
+              value={config.pool || ""}
+              onChange={(e) => setNum("pool")(e.target.value)}
+              placeholder="e.g. 1000000000"
+              className="mt-1 w-64 rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 text-lg font-bold tabular-nums"
+            />
+          </label>
+          <label className="text-sm">
+            <span className="text-neutral-400">War</span>
+            <select
+              value={selected ?? ""}
+              onChange={(e) => setSelected(e.target.value)}
+              className="mt-1 block rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 text-sm"
+            >
+              {wars.map((w) => (
+                <option key={w.torn_war_id} value={w.torn_war_id}>
+                  {w.ended_at ? "" : "🔴 LIVE — "}vs {w.opponent_name} ({fmtDate(w.started_at)})
+                </option>
+              ))}
+              <option value="all">All time (every chain)</option>
+            </select>
+          </label>
         </div>
       </section>
 
       <section className="rounded-xl border border-neutral-800 bg-neutral-900 p-5">
-        <h3 className="font-bold">Weights</h3>
+        <h3 className="font-bold">Point weights</h3>
+        <p className="mt-1 text-xs text-neutral-500">
+          Points per unit. e.g. war hit 0.3 means every war hit is worth 0.3 points.
+        </p>
         <div className="mt-3 grid grid-cols-2 gap-4 sm:grid-cols-3">
-          {weight("$ per war hit", "warHit")}
-          {weight("$ per bonus hit", "bonusHit", "milestone hits (25/50/100…)")}
-          {weight("$ per save", "save")}
-          <label className="text-sm">
-            <span className="flex items-center gap-2 text-neutral-400">
-              <input
-                type="checkbox"
-                checked={config.includeOutside}
-                onChange={(e) => setConfig((c) => ({ ...c, includeOutside: e.target.checked }))}
-              />
-              $ per outside hit
-            </span>
-            <input
-              type="number"
-              min={0}
-              value={config.outsideHit}
-              disabled={!config.includeOutside}
-              onChange={(e) => num("outsideHit")(e.target.value)}
-              className="mt-1 w-full rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1.5 tabular-nums disabled:opacity-40"
-            />
-            <span className="mt-0.5 block text-xs text-neutral-600">non-war attacks</span>
-          </label>
-          <label className="text-sm">
-            <span className="flex items-center gap-2 text-neutral-400">
-              <input
-                type="checkbox"
-                checked={config.includeDuty}
-                onChange={(e) => setConfig((c) => ({ ...c, includeDuty: e.target.checked }))}
-              />
-              $ per hour on duty
-            </span>
-            <input
-              type="number"
-              min={0}
-              value={config.hourly}
-              disabled={!config.includeDuty}
-              onChange={(e) => num("hourly")(e.target.value)}
-              className="mt-1 w-full rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1.5 tabular-nums disabled:opacity-40"
-            />
-            <span className="mt-0.5 block text-xs text-neutral-600">save/availability time</span>
-          </label>
+          {weight("War hit", "warHit")}
+          {weight("Bonus hit", "bonusHit", "milestone hits (25/50/100…)")}
+          {weight("Save", "save")}
+          {togglableWeight("Outside hit", "outsideHit", "includeOutside", "non-war attacks")}
+          {togglableWeight("Per hour on duty", "duty", "includeDuty", "save/availability time")}
         </div>
         <div className="mt-4 flex flex-wrap items-center gap-3">
           <button
@@ -233,7 +268,7 @@ export function WarPayoutPanel() {
             disabled={!dirty}
             className="rounded-md bg-neutral-800 px-4 py-2 text-sm font-semibold text-neutral-200 hover:bg-neutral-700 disabled:opacity-40"
           >
-            {dirty ? "Save as default weights" : "Weights saved"}
+            {dirty ? "Save as defaults" : "Saved"}
           </button>
           {msg && <span className="text-sm text-amber-300">{msg}</span>}
         </div>
@@ -241,11 +276,13 @@ export function WarPayoutPanel() {
 
       <section className="rounded-xl border border-neutral-800 bg-neutral-900 p-5">
         <div className="flex flex-wrap items-baseline gap-3">
-          <h3 className="font-bold">Payout</h3>
+          <h3 className="font-bold">Split</h3>
           <span className="text-lg font-black tabular-nums text-emerald-400">
-            {fmtMoney(grandTotal)}
+            {fmtMoney(distributed)}
           </span>
-          <span className="text-sm text-neutral-500">total across {rows.length} member(s)</span>
+          <span className="text-sm text-neutral-500">
+            across {rows.length} member(s) · {fmtPts(totalPoints)} total points
+          </span>
           <button
             onClick={exportCsv}
             disabled={rows.length === 0}
@@ -257,9 +294,11 @@ export function WarPayoutPanel() {
 
         {loading ? (
           <p className="mt-3 text-sm text-neutral-500">Loading…</p>
+        ) : config.pool <= 0 ? (
+          <p className="mt-3 text-sm text-amber-400">Enter a total pool above to split it.</p>
         ) : rows.length === 0 ? (
           <p className="mt-3 text-sm text-neutral-500">
-            No payable stats for this war yet, or all weights are zero.
+            No points for this war yet — set some weights, or the report has no stats.
           </p>
         ) : (
           <div className="mt-3 overflow-x-auto">
@@ -272,37 +311,31 @@ export function WarPayoutPanel() {
                   <th className="py-1.5 pr-3">Bonus</th>
                   <th className="py-1.5 pr-3">Saves</th>
                   {config.includeDuty && <th className="py-1.5 pr-3">Duty</th>}
-                  <th className="py-1.5">Total</th>
+                  <th className="py-1.5 pr-3">Points</th>
+                  <th className="py-1.5 pr-3">%</th>
+                  <th className="py-1.5">Share</th>
                 </tr>
               </thead>
               <tbody>
                 {rows.map((r) => (
                   <tr key={r.member_id} className="border-t border-neutral-800">
                     <td className="py-2 pr-3 font-medium">{r.name}</td>
-                    <td className="py-2 pr-3 tabular-nums text-neutral-400">
-                      {r.war_hits}
-                      {r.warHits > 0 && (
-                        <span className="ml-1 text-xs text-neutral-600">{fmtMoney(r.warHits)}</span>
-                      )}
-                    </td>
+                    <td className="py-2 pr-3 tabular-nums text-neutral-400">{r.war_hits}</td>
                     {config.includeOutside && (
-                      <td className="py-2 pr-3 tabular-nums text-neutral-400">
-                        {r.outside_hits}
-                        {r.outside > 0 && (
-                          <span className="ml-1 text-xs text-neutral-600">
-                            {fmtMoney(r.outside)}
-                          </span>
-                        )}
-                      </td>
+                      <td className="py-2 pr-3 tabular-nums text-neutral-400">{r.outside_hits}</td>
                     )}
                     <td className="py-2 pr-3 tabular-nums text-neutral-400">{r.bonus_hits}</td>
                     <td className="py-2 pr-3 tabular-nums text-emerald-400">{r.saves}</td>
                     {config.includeDuty && (
                       <td className="py-2 pr-3 tabular-nums text-neutral-400">
-                        {(Number(r.save_seconds) / 3600).toFixed(1)}h
+                        {r.dutyHours.toFixed(1)}h
                       </td>
                     )}
-                    <td className="py-2 font-bold tabular-nums">{fmtMoney(r.total)}</td>
+                    <td className="py-2 pr-3 tabular-nums text-neutral-300">{fmtPts(r.points)}</td>
+                    <td className="py-2 pr-3 tabular-nums text-neutral-500">
+                      {totalPoints > 0 ? ((r.points / totalPoints) * 100).toFixed(1) : "0"}%
+                    </td>
+                    <td className="py-2 font-bold tabular-nums">{fmtMoney(r.share)}</td>
                   </tr>
                 ))}
               </tbody>

@@ -2,7 +2,8 @@ import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { forbidden, sessionMember, unauthorized } from "@/lib/session";
 
-const NUMERIC_KEYS = ["warHit", "outsideHit", "bonusHit", "save", "hourly"] as const;
+// weights are point multipliers (small decimals); pool is a whole-dollar prize
+const WEIGHT_KEYS = ["warHit", "outsideHit", "bonusHit", "save", "duty"] as const;
 const BOOL_KEYS = ["includeOutside", "includeDuty"] as const;
 
 // GET → { config, wars }  (+ report when ?war_id= is set)
@@ -55,12 +56,19 @@ export async function PATCH(req: Request) {
   }
 
   const config: Record<string, number | boolean> = {};
-  for (const k of NUMERIC_KEYS) {
+
+  const pool = Number(body.pool);
+  if (!Number.isFinite(pool) || pool < 0) {
+    return NextResponse.json({ error: "Invalid pool amount" }, { status: 400 });
+  }
+  config.pool = Math.round(pool);
+
+  for (const k of WEIGHT_KEYS) {
     const n = Number(body[k]);
     if (!Number.isFinite(n) || n < 0) {
-      return NextResponse.json({ error: `Invalid value for ${k}` }, { status: 400 });
+      return NextResponse.json({ error: `Invalid weight for ${k}` }, { status: 400 });
     }
-    config[k] = Math.round(n);
+    config[k] = n; // keep decimals — these are point multipliers
   }
   for (const k of BOOL_KEYS) config[k] = Boolean(body[k]);
 

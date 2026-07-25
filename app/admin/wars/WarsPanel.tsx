@@ -22,7 +22,11 @@ interface ReportRow {
   respect: number;
   saves: number;
   best_save_seconds: number | null;
+  save_seconds: number;
 }
+
+const fmtDur = (s: number) =>
+  s >= 3600 ? `${(s / 3600).toFixed(1)}h` : s > 0 ? `${Math.round(s / 60)}m` : "—";
 
 const fmtDate = (iso: string) =>
   new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
@@ -63,8 +67,9 @@ export function WarsPanel() {
       outside_hits: acc.outside_hits + Number(r.outside_hits),
       bonus_hits: acc.bonus_hits + Number(r.bonus_hits),
       saves: acc.saves + Number(r.saves),
+      save_seconds: acc.save_seconds + Number(r.save_seconds),
     }),
-    { war_hits: 0, outside_hits: 0, bonus_hits: 0, saves: 0 },
+    { war_hits: 0, outside_hits: 0, bonus_hits: 0, saves: 0, save_seconds: 0 },
   );
 
   return (
@@ -123,7 +128,8 @@ export function WarsPanel() {
             <span className="text-sm text-neutral-500">
               {totals.war_hits.toLocaleString()} war hits ·{" "}
               {totals.outside_hits.toLocaleString()} outside ·{" "}
-              {totals.bonus_hits.toLocaleString()} bonus · {totals.saves.toLocaleString()} saves
+              {totals.bonus_hits.toLocaleString()} bonus · {totals.saves.toLocaleString()} saves ·{" "}
+              {fmtDur(totals.save_seconds)} on duty
             </span>
           )}
         </div>
@@ -144,6 +150,7 @@ export function WarsPanel() {
                   <th className="py-1.5 pr-3">Outside hits</th>
                   <th className="py-1.5 pr-3">Bonus hits</th>
                   <th className="py-1.5 pr-3">Saves</th>
+                  <th className="py-1.5 pr-3">Save time</th>
                   <th className="py-1.5 pr-3">Best save</th>
                   <th className="py-1.5">Respect</th>
                 </tr>
@@ -161,6 +168,9 @@ export function WarsPanel() {
                     </td>
                     <td className="py-2 pr-3 font-bold tabular-nums text-emerald-400">
                       {Number(r.saves) || "—"}
+                    </td>
+                    <td className="py-2 pr-3 tabular-nums text-neutral-300">
+                      {fmtDur(Number(r.save_seconds))}
                     </td>
                     <td className="py-2 pr-3 tabular-nums text-neutral-400">
                       {r.best_save_seconds !== null

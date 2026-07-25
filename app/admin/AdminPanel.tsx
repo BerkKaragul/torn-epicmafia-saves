@@ -57,6 +57,16 @@ export function AdminPanel() {
   const [adjFor, setAdjFor] = useState<number | null>(null);
   const [adjAmount, setAdjAmount] = useState("");
   const [adjNote, setAdjNote] = useState("");
+  // in-app confirmation — native confirm() gets silently disabled once a
+  // browser shows its "prevent this page from prompting" checkbox, which dead-
+  // ended the wipe / mark-paid buttons for an admin
+  const [confirmBox, setConfirmBox] = useState<{
+    title: string;
+    body: string;
+    danger: boolean;
+    confirmLabel: string;
+    onConfirm: () => void | Promise<void>;
+  } | null>(null);
 
   const load = useCallback(async () => {
     const [s, m, sv, b] = await Promise.all([
@@ -71,24 +81,30 @@ export function AdminPanel() {
     if (b.balances) setBalances(b.balances);
   }, []);
 
-  async function settle(memberId: number, name: string, paid: boolean, total: number) {
-    const what = paid
-      ? `Mark ${fmtMoney(total)} as PAID to ${name}? Do this once you've actually sent the money in Torn.`
-      : `Wipe ${name}'s ${fmtMoney(total)} balance WITHOUT paying? This can't be undone.`;
-    if (!confirm(what)) return;
-    setMsg(null);
-    const res = await fetch("/api/admin/balances", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ member_id: memberId, paid }),
+  function settle(memberId: number, name: string, paid: boolean, total: number) {
+    setConfirmBox({
+      title: paid ? `Mark ${name} paid?` : `Wipe ${name}'s balance?`,
+      body: paid
+        ? `This zeroes ${name}'s ${fmtMoney(total)} balance and records it as paid. Only do this after you've actually sent the money in Torn.`
+        : `This clears ${name}'s ${fmtMoney(total)} balance WITHOUT paying it. This can't be undone.`,
+      danger: !paid,
+      confirmLabel: paid ? "Yes, mark paid" : "Yes, wipe it",
+      onConfirm: async () => {
+        setMsg(null);
+        const res = await fetch("/api/admin/balances", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ member_id: memberId, paid }),
+        });
+        const body = await res.json();
+        setMsg(
+          res.ok
+            ? `${name}: ${fmtMoney(body.settled)} ${paid ? "marked paid" : "written off"}.`
+            : body.error,
+        );
+        await load();
+      },
     });
-    const body = await res.json();
-    setMsg(
-      res.ok
-        ? `${name}: ${fmtMoney(body.settled)} ${paid ? "marked paid" : "written off"}.`
-        : body.error,
-    );
-    await load();
   }
 
   async function submitAdjustment(e: React.FormEvent) {
@@ -159,6 +175,45 @@ export function AdminPanel() {
 
   return (
     <div className="flex flex-col gap-6">
+      {confirmBox && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+          onClick={() => setConfirmBox(null)}
+        >
+          <div
+            className="w-full max-w-sm rounded-xl border border-neutral-700 bg-neutral-900 p-5 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className={`text-lg font-bold ${confirmBox.danger ? "text-red-300" : ""}`}>
+              {confirmBox.title}
+            </h3>
+            <p className="mt-2 text-sm text-neutral-400">{confirmBox.body}</p>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                onClick={() => setConfirmBox(null)}
+                className="rounded-md border border-neutral-700 px-4 py-2 text-sm font-semibold text-neutral-300 hover:bg-neutral-800"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={async () => {
+                  const action = confirmBox.onConfirm;
+                  setConfirmBox(null);
+                  await action();
+                }}
+                className={`rounded-md px-4 py-2 text-sm font-bold text-white ${
+                  confirmBox.danger
+                    ? "bg-red-700 hover:bg-red-600"
+                    : "bg-emerald-600 hover:bg-emerald-500"
+                }`}
+              >
+                {confirmBox.confirmLabel}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {msg && <p className="text-sm text-amber-300">{msg}</p>}
 
       <section
@@ -180,22 +235,27 @@ export function AdminPanel() {
             </p>
           </div>
           <button
-            onClick={async () => {
+            onClick={() => {
               const next = !settings.saving_enabled;
-              if (
-                !next &&
-                !confirm("Turn saving OFF? This ends everyone's active shift immediately.")
-              )
-                return;
-              setMsg(null);
-              const res = await fetch("/api/admin/settings", {
-                method: "PATCH",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ saving_enabled: next }),
+              const apply = async () => {
+                setMsg(null);
+                const res = await fetch("/api/admin/settings", {
+                  method: "PATCH",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ saving_enabled: next }),
+                });
+                const body = await res.json();
+                if (!res.ok) setMsg(body.error);
+                await load();
+              };
+              if (next) return apply(); // turning ON needs no confirmation
+              setConfirmBox({
+                title: "Turn saving OFF?",
+                body: "This ends everyone's active shift immediately and stops all pay until you turn it back on.",
+                danger: true,
+                confirmLabel: "Yes, turn it off",
+                onConfirm: apply,
               });
-              const body = await res.json();
-              if (!res.ok) setMsg(body.error);
-              await load();
             }}
             className={`ml-auto rounded-md px-5 py-2.5 font-bold text-white transition ${
               settings.saving_enabled

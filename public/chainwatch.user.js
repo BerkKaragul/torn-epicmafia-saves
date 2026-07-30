@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChainWatch Saver Widget
 // @namespace    chainwatch.epicmafia
-// @version      1.1.0
+// @version      1.2.0
 // @description  Shows the current & next chain saver (and timer) from ChainWatch, inside Torn.
 // @author       EPIC Mafia
 // @license      MIT
@@ -39,28 +39,54 @@
     boxShadow: "0 4px 14px rgba(0,0,0,.5)",
     cursor: "grab",
     userSelect: "none",
+    touchAction: "none", // let us handle touch-drag instead of the page scrolling
   });
   box.innerHTML = '<div id="cw-body">ChainWatch…</div>';
   document.body.appendChild(box);
 
-  // drag to reposition (persisted) — put it under Torn's chain timer once
+  // keep it on-screen (handy when switching between PC and mobile)
+  function clamp() {
+    const maxL = Math.max(0, window.innerWidth - box.offsetWidth);
+    const maxT = Math.max(0, window.innerHeight - box.offsetHeight);
+    box.style.left = Math.min(box.offsetLeft, maxL) + "px";
+    box.style.top = Math.min(box.offsetTop, maxT) + "px";
+  }
+  clamp();
+  window.addEventListener("resize", clamp);
+
+  // drag to reposition (persisted) — works with both mouse AND touch (TornPDA)
   let drag = null;
-  box.addEventListener("mousedown", function (e) {
-    if (e.target.tagName === "A") return;
-    drag = { x: e.clientX - box.offsetLeft, y: e.clientY - box.offsetTop };
+  const pointOf = (e) => (e.touches && e.touches[0] ? e.touches[0] : e);
+
+  function startDrag(e) {
+    if (e.target.tagName === "A") return; // let links be tapped
+    const p = pointOf(e);
+    drag = { x: p.x - box.offsetLeft, y: p.y - box.offsetTop };
     box.style.cursor = "grabbing";
-  });
-  window.addEventListener("mousemove", function (e) {
+  }
+  function moveDrag(e) {
     if (!drag) return;
-    box.style.left = Math.max(0, e.clientX - drag.x) + "px";
-    box.style.top = Math.max(0, e.clientY - drag.y) + "px";
-  });
-  window.addEventListener("mouseup", function () {
+    const p = pointOf(e);
+    const maxL = Math.max(0, window.innerWidth - box.offsetWidth);
+    const maxT = Math.max(0, window.innerHeight - box.offsetHeight);
+    box.style.left = Math.min(Math.max(0, p.x - drag.x), maxL) + "px";
+    box.style.top = Math.min(Math.max(0, p.y - drag.y), maxT) + "px";
+    if (e.cancelable) e.preventDefault(); // stop the page scrolling under the finger
+  }
+  function endDrag() {
     if (!drag) return;
     drag = null;
     box.style.cursor = "grab";
     GM_setValue("cw_pos", { top: box.offsetTop, left: box.offsetLeft });
-  });
+  }
+
+  box.addEventListener("mousedown", startDrag);
+  box.addEventListener("touchstart", startDrag, { passive: true });
+  window.addEventListener("mousemove", moveDrag);
+  window.addEventListener("touchmove", moveDrag, { passive: false });
+  window.addEventListener("mouseup", endDrag);
+  window.addEventListener("touchend", endDrag);
+  window.addEventListener("touchcancel", endDrag);
 
   // ── state + rendering ────────────────────────────────────────────────────
   let data = null;

@@ -2,10 +2,12 @@ import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { rotationOrder } from "@/supabase/functions/_shared/logic/rotation";
 
-// Public, token-gated read-only feed for the Torn userscript widget. Returns
-// only non-sensitive live state (saver names + chain timer) — no ids, keys or
-// money. CORS-open so a plain fetch works too; GM_xmlhttpRequest doesn't need
-// it. Auth is the shared widget_token, not the session cookie.
+// Public read-only feed for the Torn userscript widget. Returns only
+// non-sensitive live state (saver names + chain timer) — no ids, keys or money
+// — so it needs no auth: the widget just works, zero setup. Single-faction
+// deployment, so there's only ever one faction's data to serve. CORS-open.
+// A `token` param is still accepted (and ignored) so older installs that send
+// one don't break.
 
 export const dynamic = "force-dynamic";
 const CORS = { "Access-Control-Allow-Origin": "*" };
@@ -15,17 +17,14 @@ export function OPTIONS() {
   return new NextResponse(null, { status: 204, headers: CORS });
 }
 
-export async function GET(req: Request) {
-  const token = new URL(req.url).searchParams.get("token");
-
+export async function GET() {
   const { data: settings } = await db()
     .from("settings")
-    .select("widget_token, saving_enabled, alert_threshold_s")
+    .select("saving_enabled, alert_threshold_s")
     .eq("id", 1)
     .single();
-
-  if (!settings || !token || token !== settings.widget_token) {
-    return NextResponse.json({ error: "bad token" }, { status: 401, headers: CORS });
+  if (!settings) {
+    return NextResponse.json({ error: "not ready" }, { status: 503, headers: CORS });
   }
 
   const [{ data: state }, { data: shifts }] = await Promise.all([

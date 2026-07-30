@@ -1,14 +1,14 @@
 // ==UserScript==
 // @name         ChainWatch Saver Widget
 // @namespace    chainwatch.epicmafia
-// @version      1.0.0
+// @version      1.1.0
 // @description  Shows the current & next chain saver (and timer) from ChainWatch, inside Torn.
 // @author       EPIC Mafia
+// @license      MIT
 // @match        https://www.torn.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
-// @grant        GM_registerMenuCommand
 // @connect      torn-epicmafia-saves.vercel.app
 // @run-at       document-idle
 // ==/UserScript==
@@ -16,20 +16,10 @@
 (function () {
   "use strict";
 
+  // No setup needed — it just works. Data is faction-scoped and read-only
+  // (saver names + chain timer only).
   const SITE = "https://torn-epicmafia-saves.vercel.app";
   const POLL_MS = 12000;
-
-  // ── token (one-time setup) ───────────────────────────────────────────────
-  let token = GM_getValue("cw_token", "");
-  if (!token) {
-    token = (prompt("ChainWatch: paste your saver-widget token (from the Admin page)") || "").trim();
-    if (token) GM_setValue("cw_token", token);
-  }
-  GM_registerMenuCommand("Set ChainWatch token", function () {
-    const t = (prompt("Paste your ChainWatch widget token:", GM_getValue("cw_token", "")) || "").trim();
-    GM_setValue("cw_token", t);
-    location.reload();
-  });
 
   // ── widget element ───────────────────────────────────────────────────────
   const box = document.createElement("div");
@@ -74,8 +64,6 @@
 
   // ── state + rendering ────────────────────────────────────────────────────
   let data = null;
-  let fetchedAt = 0;
-  let badToken = false;
 
   function fmt(sec) {
     sec = Math.max(0, Math.floor(sec));
@@ -87,11 +75,6 @@
     if (!body) return;
     const link = SITE + "/duty";
 
-    if (badToken) {
-      body.innerHTML =
-        '<b style="color:#f87171">Bad token</b><br><span style="color:#a3a3a3">Tampermonkey ▸ menu ▸ Set token</span>';
-      return;
-    }
     if (!data) {
       body.textContent = "ChainWatch…";
       return;
@@ -150,27 +133,16 @@
   }
 
   function poll() {
-    if (!token) {
-      badToken = true;
-      render();
-      return;
-    }
     GM_xmlhttpRequest({
       method: "GET",
-      url: SITE + "/api/widget?token=" + encodeURIComponent(token) + "&t=" + Date.now(),
+      url: SITE + "/api/widget?t=" + Date.now(),
       timeout: 10000,
       onload: function (r) {
         try {
           const j = JSON.parse(r.responseText);
-          if (j.error) {
-            badToken = true;
-          } else {
-            badToken = false;
-            data = j;
-            fetchedAt = Date.now();
-          }
+          if (!j.error) data = j;
         } catch (e) {
-          /* leave last data */
+          /* keep showing last known data */
         }
         render();
       },

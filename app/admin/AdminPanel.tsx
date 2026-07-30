@@ -627,25 +627,9 @@ export function AdminPanel() {
       <section className="rounded-xl border border-neutral-800 bg-neutral-900 p-5">
         <h2 className="font-bold">Torn browser widget (Tampermonkey)</h2>
         <p className="mt-1 text-xs text-neutral-500">
-          A small script that shows the current &amp; next saver right inside torn.com. Share the
-          steps below with the faction. Everyone uses the same token.
+          A small script that shows the current &amp; next saver right inside torn.com. No setup or
+          token — it just works once installed. Share the steps with the faction.
         </p>
-
-        <div className="mt-3 flex flex-wrap items-center gap-2">
-          <span className="text-sm text-neutral-400">Token:</span>
-          <code className="rounded bg-neutral-950 px-2 py-1 font-mono text-sm text-emerald-300">
-            {settings.widget_token}
-          </code>
-          <button
-            onClick={() => {
-              navigator.clipboard?.writeText(settings.widget_token);
-              setMsg("Token copied.");
-            }}
-            className="rounded bg-neutral-800 px-2 py-1 text-xs font-semibold text-neutral-300 hover:bg-neutral-700"
-          >
-            copy
-          </button>
-        </div>
 
         <ol className="mt-3 flex list-decimal flex-col gap-1 pl-5 text-sm text-neutral-300">
           <li>
@@ -672,12 +656,8 @@ export function AdminPanel() {
             </a>{" "}
             — Tampermonkey opens an install page; hit <span className="font-medium">Install</span>.
           </li>
-          <li>Open torn.com. It asks for the token once — paste the one above.</li>
-          <li>Drag the little box under your chain timer. Done.</li>
+          <li>Open torn.com and drag the little box under your chain timer. Done.</li>
         </ol>
-        <p className="mt-2 text-xs text-neutral-600">
-          To change the token later: Tampermonkey menu → “Set ChainWatch token”.
-        </p>
       </section>
     </div>
   );

@@ -6,7 +6,8 @@ const STEPS = [
   { icon: "🟢", text: "Open **My duty** → tap **“I can save”**." },
   { icon: "🔔", text: "Tap **Arm danger siren** so you hear the alarm." },
   { icon: "⏳", text: "Wait. When it’s **your turn**, the siren screams." },
-  { icon: "🌍", text: "Attack **anyone abroad** — and **HOLD** the result page." },
+  { icon: "🌍", text: "Attack **anyone abroad** and beat them." },
+  { icon: "✋", text: "**HOLD** — don’t click Leave/Mug/Hospitalize yet. Wait." },
   { icon: "✅", text: "Land the hit **under 1:00** = a save. You get paid." },
   { icon: "✈️", text: "Flying, hospital or jail? You’re **paused** — no worries." },
   { icon: "⏹️", text: "Done? Tap **Stop saving**." },
@@ -51,7 +52,7 @@ export function HowItWorks() {
   return (
     <section className="mb-6 rounded-2xl border border-emerald-900 bg-emerald-950/20 p-5">
       <div className="flex items-center gap-2">
-        <h2 className="text-lg font-bold text-emerald-300">How to save — in 7 steps</h2>
+        <h2 className="text-lg font-bold text-emerald-300">How to save — in 8 steps</h2>
         <button
           onClick={hide}
           className="ml-auto rounded-md px-2 py-1 text-xs text-neutral-500 hover:bg-neutral-800 hover:text-neutral-300"
@@ -72,10 +73,17 @@ export function HowItWorks() {
         ))}
       </ol>
 
-      <p className="mt-4 rounded-lg bg-neutral-900/70 px-3 py-2 text-xs text-neutral-400">
-        💡 A <strong className="text-neutral-200">save</strong> = you stop the chain from dying.
-        “Holding” the attack page keeps you on it longer, so the save is safer.
-      </p>
+      <div className="mt-4 space-y-2 rounded-lg bg-neutral-900/70 px-3 py-2 text-xs text-neutral-400">
+        <p>
+          💡 A <strong className="text-neutral-200">save</strong> = you stop the chain from dying.
+        </p>
+        <p>
+          ✋ <strong className="text-neutral-200">Holding</strong> = you already beat the target,
+          but you <strong className="text-neutral-200">don’t</strong> press Leave / Mug /
+          Hospitalize. The hit only counts when you finish — so you wait, letting the chain timer
+          run down, to buy the chain the most time. Finish it right before the timer hits 0.
+        </p>
+      </div>
     </section>
   );
 }

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChainWatch Saver Widget
 // @namespace    chainwatch.epicmafia
-// @version      1.2.0
+// @version      1.3.0
 // @description  Shows the current & next chain saver (and timer) from ChainWatch, inside Torn.
 // @author       EPIC Mafia
 // @license      MIT
@@ -54,39 +54,70 @@
   clamp();
   window.addEventListener("resize", clamp);
 
-  // drag to reposition (persisted) — works with both mouse AND touch (TornPDA)
+  // drag to reposition (persisted). Pointer Events + pointer-capture is the
+  // one approach that reliably works in mobile webviews like TornPDA; touch/
+  // mouse events there often never reach the script. Fall back to touch/mouse
+  // only if PointerEvent is missing.
   let drag = null;
-  const pointOf = (e) => (e.touches && e.touches[0] ? e.touches[0] : e);
 
-  function startDrag(e) {
-    if (e.target.tagName === "A") return; // let links be tapped
-    const p = pointOf(e);
-    drag = { x: p.x - box.offsetLeft, y: p.y - box.offsetTop };
-    box.style.cursor = "grabbing";
-  }
-  function moveDrag(e) {
-    if (!drag) return;
-    const p = pointOf(e);
+  function moveTo(px, py) {
     const maxL = Math.max(0, window.innerWidth - box.offsetWidth);
     const maxT = Math.max(0, window.innerHeight - box.offsetHeight);
-    box.style.left = Math.min(Math.max(0, p.x - drag.x), maxL) + "px";
-    box.style.top = Math.min(Math.max(0, p.y - drag.y), maxT) + "px";
-    if (e.cancelable) e.preventDefault(); // stop the page scrolling under the finger
+    box.style.left = Math.min(Math.max(0, px - drag.x), maxL) + "px";
+    box.style.top = Math.min(Math.max(0, py - drag.y), maxT) + "px";
   }
-  function endDrag() {
-    if (!drag) return;
+  function persist() {
     drag = null;
     box.style.cursor = "grab";
     GM_setValue("cw_pos", { top: box.offsetTop, left: box.offsetLeft });
   }
 
-  box.addEventListener("mousedown", startDrag);
-  box.addEventListener("touchstart", startDrag, { passive: true });
-  window.addEventListener("mousemove", moveDrag);
-  window.addEventListener("touchmove", moveDrag, { passive: false });
-  window.addEventListener("mouseup", endDrag);
-  window.addEventListener("touchend", endDrag);
-  window.addEventListener("touchcancel", endDrag);
+  if (window.PointerEvent) {
+    box.addEventListener("pointerdown", function (e) {
+      if (e.target.tagName === "A") return; // let the link be tapped
+      drag = { x: e.clientX - box.offsetLeft, y: e.clientY - box.offsetTop, id: e.pointerId };
+      try {
+        box.setPointerCapture(e.pointerId); // route all further moves to the box
+      } catch (_) {}
+      box.style.cursor = "grabbing";
+      e.preventDefault();
+    });
+    box.addEventListener("pointermove", function (e) {
+      if (!drag || e.pointerId !== drag.id) return;
+      moveTo(e.clientX, e.clientY);
+      e.preventDefault();
+    });
+    const up = function (e) {
+      if (!drag) return;
+      try {
+        box.releasePointerCapture(drag.id);
+      } catch (_) {}
+      persist();
+    };
+    box.addEventListener("pointerup", up);
+    box.addEventListener("pointercancel", up);
+  } else {
+    const pt = (e) => (e.touches && e.touches[0] ? e.touches[0] : e);
+    const start = function (e) {
+      if (e.target.tagName === "A") return;
+      const p = pt(e);
+      drag = { x: p.x - box.offsetLeft, y: p.y - box.offsetTop };
+      box.style.cursor = "grabbing";
+    };
+    const move = function (e) {
+      if (!drag) return;
+      const p = pt(e);
+      moveTo(p.x, p.y);
+      if (e.cancelable) e.preventDefault();
+    };
+    box.addEventListener("mousedown", start);
+    box.addEventListener("touchstart", start, { passive: true });
+    window.addEventListener("mousemove", move);
+    window.addEventListener("touchmove", move, { passive: false });
+    window.addEventListener("mouseup", persist);
+    window.addEventListener("touchend", persist);
+    window.addEventListener("touchcancel", persist);
+  }
 
   // ── state + rendering ────────────────────────────────────────────────────
   let data = null;

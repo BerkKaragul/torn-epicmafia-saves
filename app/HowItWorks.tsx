@@ -84,6 +84,22 @@ export function HowItWorks() {
           run down, to buy the chain the most time. Finish it right before the timer hits 0.
         </p>
       </div>
+
+      <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2.5 text-sm">
+        <span>🧩</span>
+        <span className="text-neutral-300">
+          Want the current &amp; next saver <strong>inside Torn</strong>?
+        </span>
+        <a
+          href="https://greasyfork.org/en/scripts/589168-chainwatch-saver-widget"
+          target="_blank"
+          rel="noreferrer"
+          className="rounded-md bg-emerald-700 px-3 py-1 font-semibold text-white hover:bg-emerald-600"
+        >
+          Get the Torn widget →
+        </a>
+        <span className="text-xs text-neutral-500">(needs Tampermonkey)</span>
+      </div>
     </section>
   );
 }

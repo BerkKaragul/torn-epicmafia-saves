@@ -42,6 +42,15 @@ export function Nav({
       {isAdmin && tab("war-payout", "/admin/war-payout", "War pay")}
       {isAdmin && tab("payouts", "/admin/payouts", "Payouts")}
       <div className="ml-auto flex items-center gap-3 text-sm text-neutral-500">
+        <a
+          href="https://greasyfork.org/en/scripts/589168-chainwatch-saver-widget"
+          target="_blank"
+          rel="noreferrer"
+          className="rounded-md border border-neutral-700 px-2 py-1 text-xs font-medium text-neutral-300 hover:bg-neutral-800"
+          title="Show the saver inside Torn (needs Tampermonkey)"
+        >
+          🧩 Widget
+        </a>
         <span>{name}</span>
         <button onClick={logout} className="text-neutral-500 underline hover:text-neutral-300">
           log out

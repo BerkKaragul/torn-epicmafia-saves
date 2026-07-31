@@ -11,6 +11,12 @@ export function LiveChain({ initial, myId }: { initial: StatePayload; myId: numb
   const [nowS, setNowS] = useState(() => Math.floor(Date.now() / 1000));
   const [soundOn, setSoundOn] = useState(false);
 
+  // remember the armed choice across navigation/reloads, shared with the duty
+  // page via the same key (read in an effect to avoid an SSR hydration mismatch)
+  useEffect(() => {
+    if (localStorage.getItem("cw_siren") === "1") setSoundOn(true);
+  }, []);
+
   // Realtime "poke" → re-fetch the authenticated /api/state. The public
   // channel carries no data, so a forged broadcast can waste a fetch but can
   // never spoof chain state; the 30s poll runs only while the socket is down.
@@ -151,6 +157,7 @@ export function LiveChain({ initial, myId }: { initial: StatePayload; myId: numb
               armAlarm();
               playAlarm(false); // let them hear exactly what's coming
             }
+            localStorage.setItem("cw_siren", next ? "1" : "0");
             setSoundOn(next);
           }}
           className={`rounded-md border px-3 py-1.5 text-sm font-medium transition ${

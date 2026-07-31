@@ -39,11 +39,14 @@ export async function GET() {
         .select("id", { count: "exact", head: true })
         .eq("member_id", member.torn_id),
       db().from("shifts").select("id", { count: "exact", head: true }).is("ended_at", null),
+      // savers actually earning right now: on duty, not blocked, and abroad
+      // (home-city time doesn't earn) — this drives the live per-saver split
       db()
         .from("shifts")
         .select("id", { count: "exact", head: true })
         .is("ended_at", null)
-        .is("unavailable_state", null),
+        .is("unavailable_state", null)
+        .eq("abroad", true),
       db()
         .from("poller_state")
         .select("last_chain_id, last_current, last_max, last_timeout_s, last_cooldown_s, last_poll_at")
@@ -103,6 +106,7 @@ export async function GET() {
     },
     alert_threshold_s: settings?.alert_threshold_s ?? 90,
     unavailable_state: activeShift?.unavailable_state ?? null,
+    abroad: activeShift?.abroad ?? false,
     missed_turns: missedTurns ?? 0,
     slots: { cap: settings?.saver_cap ?? 0, active: activeSavers ?? 0 },
   });

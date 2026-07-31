@@ -34,6 +34,7 @@ interface Me {
   };
   alert_threshold_s: number;
   unavailable_state: string | null;
+  abroad: boolean;
   missed_turns: number;
   slots: { cap: number; active: number };
 }
@@ -236,6 +237,18 @@ export function DutyPanel() {
           <p className="mt-1 text-sm text-neutral-400">
             You keep your place in the queue, but the turn skips you and your pay clock is
             paused until you&apos;re back.
+          </p>
+        </section>
+      )}
+
+      {shift && !me.unavailable_state && !me.abroad && (
+        <section className="rounded-xl border border-amber-700 bg-amber-950/40 p-4">
+          <p className="font-bold text-amber-300">
+            🏙 You&apos;re in the home city — no pay is accruing
+          </p>
+          <p className="mt-1 text-sm text-neutral-400">
+            Saves are done abroad, so you only earn while you&apos;re in another country. Fly
+            abroad to start your pay clock. You keep your place in the queue either way.
           </p>
         </section>
       )}

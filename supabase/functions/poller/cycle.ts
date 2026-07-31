@@ -33,6 +33,7 @@ interface ActiveShiftRow {
   planned_minutes: number | null;
   last_save_at: string | null;
   unavailable_state: string | null;
+  abroad: boolean;
   hourly_rate_snapshot: number | string;
   members: MemberKeyRow;
 }
@@ -150,7 +151,7 @@ export async function runPollCycle(): Promise<void> {
     const { data: activeShiftsRaw } = await db
       .from("shifts")
       .select(
-        `id, member_id, started_at, planned_minutes, last_save_at, unavailable_state, hourly_rate_snapshot, members!inner(${MEMBER_KEY_COLS})`,
+        `id, member_id, started_at, planned_minutes, last_save_at, unavailable_state, abroad, hourly_rate_snapshot, members!inner(${MEMBER_KEY_COLS})`,
       )
       .is("ended_at", null)
       .returns<ActiveShiftRow[]>();
@@ -453,7 +454,9 @@ async function accruePay(
   const elapsed = Math.min(Math.max(0, nowS - lastAccrualS), settings.poll_interval_s * 3);
   if (elapsed <= 0 || !chainLive || !settings.saving_enabled) return;
 
-  const eligible = activeShifts.filter((s) => !s.unavailable_state);
+  // pay only savers who are on-station: not blocked (travel/hospital/…) AND
+  // actually abroad, where saving happens. Home-city time earns nothing.
+  const eligible = activeShifts.filter((s) => !s.unavailable_state && s.abroad);
   if (eligible.length === 0) return;
 
   const rows = eligible
@@ -919,6 +922,17 @@ async function syncAvailability(
 
   for (const shift of activeShifts) {
     const state = stateById.get(shift.member_id) ?? "Okay";
+
+    // Hourly pay only accrues while a saver is abroad (saves are done in another
+    // country); being home in the main city earns nothing. This is a pay gate
+    // only — rotation/turns still treat them normally (handled via
+    // unavailable_state below, which we deliberately leave untouched here).
+    const abroad = state === "Abroad";
+    if (abroad !== shift.abroad) {
+      await db.from("shifts").update({ abroad }).eq("id", shift.id);
+      shift.abroad = abroad;
+    }
+
     const blocked = BLOCKING_STATES.has(state) ? state : null;
     if (blocked === shift.unavailable_state) continue;
 

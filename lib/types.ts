@@ -43,6 +43,7 @@ export interface ShiftRow {
   hourly_rate_snapshot: number;
   last_save_at: string | null;
   unavailable_state: string | null;
+  abroad: boolean;
   payout_line_id: string | null;
 }
 

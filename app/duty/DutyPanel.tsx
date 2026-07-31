@@ -326,9 +326,15 @@ export function DutyPanel() {
           <p className="mt-1 text-sm text-neutral-400">
             Posted rate: {fmtMoney(me.rates?.hourly_rate ?? 0)}/hour (1–2 savers get it in full;
             3+ share double that) +{" "}
-            {fmtMoney(me.rates?.per_save_bonus ?? 0)} per save
-            {me.rates?.save_bonus_mode === "scaled" && (
-              <span className="text-amber-400"> (scales with chain size — ×chain/100)</span>
+            {(me.rates?.per_save_bonus ?? 0) > 0 ? (
+              <>
+                {fmtMoney(me.rates?.per_save_bonus ?? 0)} per save
+                {me.rates?.save_bonus_mode === "scaled" && (
+                  <span className="text-amber-400"> (scales with chain size — ×chain/100)</span>
+                )}
+              </>
+            ) : (
+              <span className="text-amber-300">a save bonus based on the war reward</span>
             )}
             .
           </p>
@@ -420,8 +426,19 @@ export function DutyPanel() {
             <p className="text-xs text-neutral-500">saves confirmed</p>
           </div>
           <div>
-            <p className="text-2xl font-bold tabular-nums">{fmtMoney(me.unpaid.saves_amount)}</p>
-            <p className="text-xs text-neutral-500">for saves</p>
+            {(me.rates?.per_save_bonus ?? 0) > 0 ? (
+              <>
+                <p className="text-2xl font-bold tabular-nums">
+                  {fmtMoney(me.unpaid.saves_amount)}
+                </p>
+                <p className="text-xs text-neutral-500">for saves</p>
+              </>
+            ) : (
+              <>
+                <p className="text-lg font-bold text-amber-300">war reward</p>
+                <p className="text-xs text-neutral-500">save bonus paid from it</p>
+              </>
+            )}
           </div>
           <div>
             <p

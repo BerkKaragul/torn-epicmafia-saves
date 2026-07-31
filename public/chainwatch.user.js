@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ChainWatch Saver Widget
 // @namespace    chainwatch.epicmafia
-// @version      1.4.0
-// @description  Shows the current & next chain saver (and timer) from ChainWatch, inside Torn — with the same danger siren as the site.
+// @version      1.5.0
+// @description  Shows the current & next chain saver (and timer) from ChainWatch, inside Torn — with the same danger siren as the site (one tab plays, not all).
 // @author       EPIC Mafia
 // @license      MIT
 // @match        https://www.torn.com/*
@@ -129,6 +129,61 @@
   let sirenTimer = null;
   let sirenLevel = null; // null = stopped, false = warning cadence, true = critical
 
+  // ── cross-tab audio master ─────────────────────────────────────────────────
+  // With several Torn tabs open, every tab would blast the siren at once. Only
+  // ONE tab should make the sound (the visual widget still runs in all of them).
+  // Armed tabs elect a single "audio master" over a BroadcastChannel: a visible
+  // tab beats a hidden one, ties broken by the oldest tab. Electing only among
+  // *armed* tabs guarantees the master's audio is unlocked (arming = a click).
+  const TAB_ID = Date.now() + "-" + Math.random();
+  const peers = {}; // other armed tabs -> { t: lastBeat ms, vis: 0 visible / 1 hidden }
+  let bc = null;
+  try {
+    if (window.BroadcastChannel) bc = new BroadcastChannel("cw_siren_audio");
+  } catch (e) {
+    /* fall back to solo playback */
+  }
+
+  const myVis = () => (document.hidden ? 1 : 0);
+  function olderThan(a, b) {
+    const na = parseInt(a, 10);
+    const nb = parseInt(b, 10);
+    return na !== nb ? na < nb : a < b; // lower timestamp = older tab wins
+  }
+  function isAudioMaster() {
+    if (!sirenOn) return false;
+    if (!bc) return true; // no cross-tab support → this tab just plays
+    const now = Date.now();
+    const myV = myVis();
+    for (const id in peers) {
+      const p = peers[id];
+      if (now - p.t > 3000) {
+        delete peers[id]; // stale — that tab is gone or throttled
+        continue;
+      }
+      if (p.vis < myV) return false; // a visible armed tab outranks this hidden one
+      if (p.vis === myV && olderThan(id, TAB_ID)) return false; // same visibility, older wins
+    }
+    return true;
+  }
+  function announce(type) {
+    if (bc) bc.postMessage({ type: type, id: TAB_ID, vis: myVis() });
+  }
+  if (bc) {
+    bc.onmessage = function (e) {
+      const m = e.data || {};
+      if (m.type === "beat" && m.id) peers[m.id] = { t: Date.now(), vis: m.vis || 0 };
+      else if (m.type === "bye" && m.id) delete peers[m.id];
+    };
+    setInterval(() => announce("beat"), 1000); // heartbeat so others can rank us
+    document.addEventListener("visibilitychange", () => announce("beat")); // re-rank on tab switch
+    window.addEventListener("pagehide", () => announce("bye")); // hand off promptly on close
+  }
+
+  function burst(critical) {
+    if (isAudioMaster()) playAlarm(critical); // only the elected tab makes noise
+  }
+
   function stopSiren() {
     if (sirenTimer) clearInterval(sirenTimer);
     sirenTimer = null;
@@ -143,9 +198,9 @@
     if (sirenTimer && sirenLevel === critical) return; // already running at right cadence
     stopSiren();
     sirenLevel = critical;
-    playAlarm(critical);
+    burst(critical);
     sirenTimer = setInterval(function () {
-      playAlarm(critical);
+      burst(critical);
     }, alarmInterval(critical));
   }
 
@@ -192,9 +247,11 @@
     sirenBtn.title = sirenOn ? "Siren armed — tap to mute" : "Arm danger siren";
     if (sirenOn) {
       armAlarm(); // unlock audio for later bursts
-      playAlarm(false); // a test blast so you know it's live
+      playAlarm(false); // a test blast so you know it's live (this tab)
+      announce("beat"); // join the audio-master election right away
     } else {
       stopSiren();
+      announce("bye"); // leave the election so another tab can take over
     }
   });
 

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ChainWatch Saver Widget
 // @namespace    chainwatch.epicmafia
-// @version      1.3.0
-// @description  Shows the current & next chain saver (and timer) from ChainWatch, inside Torn.
+// @version      1.4.0
+// @description  Shows the current & next chain saver (and timer) from ChainWatch, inside Torn — with the same danger siren as the site.
 // @author       EPIC Mafia
 // @license      MIT
 // @match        https://www.torn.com/*
@@ -20,6 +20,134 @@
   // (saver names + chain timer only).
   const SITE = "https://torn-epicmafia-saves.vercel.app";
   const POLL_MS = 12000;
+
+  // ── danger siren ─────────────────────────────────────────────────────────
+  // A verbatim port of the website's alarm (lib/alarm.ts): a harsh sawtooth
+  // air-raid siren sweeping through a dissonant partner tone, chopped by a
+  // fast tremolo. `critical` (chain about to die) is faster, higher and louder.
+  let audioCtx = null;
+
+  function audio() {
+    try {
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === "suspended") audioCtx.resume();
+      return audioCtx;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // Call once from a click (arm) so the browser lets us make noise later.
+  function armAlarm() {
+    const c = audio();
+    if (!c) return false;
+    const osc = c.createOscillator();
+    const gain = c.createGain();
+    gain.gain.value = 0.0001;
+    osc.connect(gain).connect(c.destination);
+    osc.start();
+    osc.stop(c.currentTime + 0.01);
+    return true;
+  }
+
+  function playAlarm(critical) {
+    const c = audio();
+    if (!c) return;
+    const t0 = c.currentTime;
+    const dur = critical ? 1.5 : 1.1;
+    const sweeps = critical ? 3 : 2;
+    const lowHz = critical ? 620 : 440;
+    const highHz = critical ? 1750 : 1150;
+
+    const master = c.createGain();
+    master.gain.setValueAtTime(0, t0);
+    master.gain.linearRampToValueAtTime(critical ? 0.6 : 0.42, t0 + 0.02);
+    master.gain.setValueAtTime(critical ? 0.6 : 0.42, t0 + dur - 0.08);
+    master.gain.linearRampToValueAtTime(0, t0 + dur);
+
+    // tremolo: chops the tone so it pulses rather than drones
+    const tremolo = c.createGain();
+    tremolo.gain.value = 1;
+    const lfo = c.createOscillator();
+    const lfoDepth = c.createGain();
+    lfo.type = "square";
+    lfo.frequency.value = critical ? 14 : 9;
+    lfoDepth.gain.value = 0.5;
+    lfo.connect(lfoDepth).connect(tremolo.gain);
+
+    // a touch of distortion for grit
+    const shaper = c.createWaveShaper();
+    const curve = new Float32Array(257);
+    for (let i = 0; i < 257; i++) {
+      const x = (i / 256) * 2 - 1;
+      curve[i] = Math.tanh(x * 3);
+    }
+    shaper.curve = curve;
+
+    tremolo.connect(shaper).connect(master).connect(c.destination);
+
+    const makeVoice = function (type, detune, level) {
+      const osc = c.createOscillator();
+      const g = c.createGain();
+      osc.type = type;
+      osc.detune.value = detune;
+      g.gain.value = level;
+      const step = dur / (sweeps * 2);
+      osc.frequency.setValueAtTime(lowHz, t0);
+      for (let i = 0; i < sweeps; i++) {
+        const base = t0 + i * step * 2;
+        osc.frequency.linearRampToValueAtTime(highHz, base + step);
+        osc.frequency.linearRampToValueAtTime(lowHz, base + step * 2);
+      }
+      osc.connect(g).connect(tremolo);
+      osc.start(t0);
+      osc.stop(t0 + dur);
+    };
+
+    makeVoice("sawtooth", 0, 0.5);
+    makeVoice("square", 30, 0.28); // dissonant partner = harsher, more "wrong"
+    if (critical) makeVoice("sawtooth", -1200, 0.22); // octave-down growl
+
+    lfo.start(t0);
+    lfo.stop(t0 + dur);
+
+    // phones: buzz in the same rhythm
+    try {
+      if (navigator.vibrate) navigator.vibrate(critical ? [300, 90, 300, 90, 600] : [220, 120, 220]);
+    } catch (e) {
+      /* unsupported */
+    }
+  }
+
+  function alarmInterval(critical) {
+    return critical ? 1700 : 2600;
+  }
+
+  // siren loop — mirrors the site: while armed AND the chain is in danger,
+  // burst on a timer; re-time the interval when danger escalates to critical.
+  let sirenOn = GM_getValue("cw_siren", false);
+  let sirenTimer = null;
+  let sirenLevel = null; // null = stopped, false = warning cadence, true = critical
+
+  function stopSiren() {
+    if (sirenTimer) clearInterval(sirenTimer);
+    sirenTimer = null;
+    sirenLevel = null;
+  }
+
+  function updateSiren(live, danger, critical) {
+    if (!sirenOn || !live || !danger) {
+      stopSiren();
+      return;
+    }
+    if (sirenTimer && sirenLevel === critical) return; // already running at right cadence
+    stopSiren();
+    sirenLevel = critical;
+    playAlarm(critical);
+    sirenTimer = setInterval(function () {
+      playAlarm(critical);
+    }, alarmInterval(critical));
+  }
 
   // ── widget element ───────────────────────────────────────────────────────
   const box = document.createElement("div");
@@ -41,8 +169,34 @@
     userSelect: "none",
     touchAction: "none", // let us handle touch-drag instead of the page scrolling
   });
-  box.innerHTML = '<div id="cw-body">ChainWatch…</div>';
+  // Persistent header (title + siren toggle) so a re-render never wipes the
+  // button; only #cw-body is rewritten each poll.
+  box.innerHTML =
+    '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">' +
+    '<b style="color:#34d399;font-size:11px;flex:1">🔗 ChainWatch</b>' +
+    '<span id="cw-siren" data-cw-nodrag="1" style="cursor:pointer;font-size:15px;line-height:1" ' +
+    'title="Arm danger siren">' +
+    (sirenOn ? "🔊" : "🔇") +
+    "</span></div>" +
+    '<div id="cw-body">ChainWatch…</div>';
   document.body.appendChild(box);
+
+  // siren toggle — the click also unlocks audio (required on mobile/TornPDA)
+  const sirenBtn = box.querySelector("#cw-siren");
+  sirenBtn.title = sirenOn ? "Siren armed — tap to mute" : "Arm danger siren";
+  sirenBtn.addEventListener("click", function (e) {
+    e.stopPropagation();
+    sirenOn = !sirenOn;
+    GM_setValue("cw_siren", sirenOn);
+    sirenBtn.textContent = sirenOn ? "🔊" : "🔇";
+    sirenBtn.title = sirenOn ? "Siren armed — tap to mute" : "Arm danger siren";
+    if (sirenOn) {
+      armAlarm(); // unlock audio for later bursts
+      playAlarm(false); // a test blast so you know it's live
+    } else {
+      stopSiren();
+    }
+  });
 
   // keep it on-screen (handy when switching between PC and mobile)
   function clamp() {
@@ -60,6 +214,10 @@
   // only if PointerEvent is missing.
   let drag = null;
 
+  function noDrag(target) {
+    return target.tagName === "A" || (target.closest && target.closest("[data-cw-nodrag]"));
+  }
+
   function moveTo(px, py) {
     const maxL = Math.max(0, window.innerWidth - box.offsetWidth);
     const maxT = Math.max(0, window.innerHeight - box.offsetHeight);
@@ -74,7 +232,7 @@
 
   if (window.PointerEvent) {
     box.addEventListener("pointerdown", function (e) {
-      if (e.target.tagName === "A") return; // let the link be tapped
+      if (noDrag(e.target)) return; // let the link / siren button be tapped
       drag = { x: e.clientX - box.offsetLeft, y: e.clientY - box.offsetTop, id: e.pointerId };
       try {
         box.setPointerCapture(e.pointerId); // route all further moves to the box
@@ -99,7 +257,7 @@
   } else {
     const pt = (e) => (e.touches && e.touches[0] ? e.touches[0] : e);
     const start = function (e) {
-      if (e.target.tagName === "A") return;
+      if (noDrag(e.target)) return;
       const p = pt(e);
       drag = { x: p.x - box.offsetLeft, y: p.y - box.offsetTop };
       box.style.cursor = "grabbing";
@@ -134,6 +292,7 @@
 
     if (!data) {
       body.textContent = "ChainWatch…";
+      updateSiren(false, false, false);
       return;
     }
 
@@ -146,9 +305,19 @@
     const critical = live && remaining <= 45;
     const timerColor = critical ? "#f87171" : danger ? "#fbbf24" : "#34d399";
 
-    let html = '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">';
-    html += '<b style="color:#34d399;font-size:11px">🔗 ChainWatch</b></div>';
+    // scary like the site: glow the box red while the chain is in danger
+    if (danger) {
+      box.style.borderColor = critical ? "#ef4444" : "#f59e0b";
+      box.style.boxShadow = "0 0 14px " + (critical ? "rgba(239,68,68,.7)" : "rgba(245,158,11,.55)");
+    } else {
+      box.style.borderColor = "#10b981";
+      box.style.boxShadow = "0 4px 14px rgba(0,0,0,.5)";
+    }
 
+    // keep the audible alarm in lockstep with the site's logic
+    updateSiren(live, danger, critical);
+
+    let html = "";
     if (live) {
       html +=
         '<div style="font-weight:800;font-size:20px;color:' +
@@ -211,5 +380,5 @@
 
   poll();
   setInterval(poll, POLL_MS);
-  setInterval(render, 1000); // smooth countdown between polls
+  setInterval(render, 1000); // smooth countdown + siren check between polls
 })();

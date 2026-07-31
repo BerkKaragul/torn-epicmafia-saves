@@ -51,6 +51,12 @@ export function DutyPanel() {
   const [sirenOn, setSirenOn] = useState(false);
   const sirenRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // remember whether the siren was armed, across page navigation/reloads
+  // (read in an effect, not initial state, to avoid an SSR hydration mismatch)
+  useEffect(() => {
+    if (localStorage.getItem("cw_siren") === "1") setSirenOn(true);
+  }, []);
+
   const load = useCallback(async () => {
     const res = await fetch("/api/me");
     if (res.ok) setMe(await res.json());
@@ -196,6 +202,7 @@ export function DutyPanel() {
                 armAlarm();
                 playAlarm(false);
               }
+              localStorage.setItem("cw_siren", next ? "1" : "0");
               setSirenOn(next);
             }}
             className={`ml-auto rounded-md border px-3 py-1.5 text-xs font-semibold transition ${

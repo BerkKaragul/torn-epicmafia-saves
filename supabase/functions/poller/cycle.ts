@@ -929,6 +929,19 @@ async function syncChainReports(db: SupabaseClient, torn: TornClient): Promise<v
           .from("chain_contributions")
           .upsert(contributions, { onConflict: "torn_chain_id,member_id" });
       }
+      // per-milestone bonus respect (50th/100th/250th/… hits) so the payout can
+      // strip that inflated respect back out
+      const bonusRows = (report.bonuses ?? []).map((b) => ({
+        torn_chain_id: row.torn_chain_id,
+        chain_count: b.chain,
+        member_id: b.attacker_id,
+        respect: b.respect,
+      }));
+      if (bonusRows.length) {
+        await db
+          .from("chain_bonuses")
+          .upsert(bonusRows, { onConflict: "torn_chain_id,chain_count" });
+      }
       await db
         .from("chains")
         .update({ report_synced: true })

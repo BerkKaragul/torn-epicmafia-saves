@@ -87,6 +87,34 @@ export interface TornRankedWar {
   factions: { id: number; name: string; score: number; chain: number }[];
 }
 
+// Ranked war report — only available once a war has ended. `attacks` on each
+// member is the authoritative war-hit count (includes non-chain war hits that
+// chain reports never show); `score` is their war-score contribution.
+export interface TornRankedWarReportMember {
+  id: number;
+  name: string;
+  level: number;
+  attacks: number;
+  score: number;
+}
+
+export interface TornRankedWarReportFaction {
+  id: number;
+  name: string;
+  score: number;
+  attacks: number;
+  members: TornRankedWarReportMember[];
+}
+
+export interface TornRankedWarReport {
+  id: number;
+  start: number;
+  end: number;
+  winner: number | null;
+  forfeit: boolean;
+  factions: TornRankedWarReportFaction[];
+}
+
 export interface TornChainReportAttacker {
   id: number;
   respect: { total: number; average: number; best: number };
@@ -198,6 +226,10 @@ export function makeTornClient(opts: TornClientOptions) {
       call<{ members: TornFactionMember[] }>("/faction/members").then((r) => r.members),
     rankedWars: () =>
       call<{ rankedwars: TornRankedWar[] }>("/faction/rankedwars").then((r) => r.rankedwars),
+    rankedWarReport: (warId: number) =>
+      call<{ rankedwarreport: TornRankedWarReport }>(`/faction/${warId}/rankedwarreport`).then(
+        (r) => r.rankedwarreport,
+      ),
     chainReport: (chainId: number) =>
       call<{ chainreport: TornChainReport }>(`/faction/${chainId}/chainreport`).then(
         (r) => r.chainreport,

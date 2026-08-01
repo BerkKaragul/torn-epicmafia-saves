@@ -360,6 +360,7 @@ export async function runPollCycle(): Promise<void> {
     if (rosterAge > 600) {
       await refreshRoster(db, pollerMember, settings);
       await syncWars(db, pollerTorn, settings.faction_id);
+      await syncWarReports(db, pollerTorn, settings.faction_id);
       rosterRefreshedAt = toIso(nowS);
     }
 
@@ -838,6 +839,59 @@ async function syncWars(
     if (rows.length) await db.from("wars").upsert(rows, { onConflict: "torn_war_id" });
   } catch (e) {
     console.error("war sync failed:", e);
+  }
+}
+
+/**
+ * Once a war ends, Torn's ranked war report gives the AUTHORITATIVE per-member
+ * war-hit count — including war hits that were never part of a chain, which the
+ * chain reports miss. Pulled once per ended war; failures just retry next pass
+ * (the endpoint is public + stable, so this stays cheap).
+ */
+async function syncWarReports(
+  db: SupabaseClient,
+  torn: TornClient,
+  factionId: number,
+): Promise<void> {
+  const { data: pending } = await db
+    .from("wars")
+    .select("torn_war_id")
+    .eq("report_synced", false)
+    .not("ended_at", "is", null)
+    .order("ended_at", { ascending: false })
+    .limit(3);
+  if (!pending?.length) return;
+
+  for (const row of pending) {
+    try {
+      const report = await torn.rankedWarReport(row.torn_war_id);
+      const ours = report.factions?.find((f) => f.id === factionId);
+      if (ours?.members?.length) {
+        await db.from("war_contributions").upsert(
+          ours.members.map((mem) => ({
+            torn_war_id: row.torn_war_id,
+            member_id: mem.id,
+            war_hits: mem.attacks,
+            war_score: mem.score,
+          })),
+          { onConflict: "torn_war_id,member_id" },
+        );
+        // name everyone who fought, even members who never signed into ChainWatch
+        await db.from("roster").upsert(
+          ours.members.map((mem) => ({
+            torn_id: mem.id,
+            name: mem.name,
+            updated_at: new Date().toISOString(),
+          })),
+          { onConflict: "torn_id" },
+        );
+      }
+      await db.from("wars").update({ report_synced: true }).eq("torn_war_id", row.torn_war_id);
+    } catch (e) {
+      // leave report_synced=false so it retries; don't hammer on rate limits
+      if (isRateLimitError(e)) return;
+      console.error(`war report ${row.torn_war_id} failed:`, e);
+    }
   }
 }
 

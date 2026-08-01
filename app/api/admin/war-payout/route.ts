@@ -3,7 +3,7 @@ import { db } from "@/lib/db";
 import { forbidden, sessionMember, unauthorized } from "@/lib/session";
 
 // weights are point multipliers (small decimals); pool is a whole-dollar prize
-const WEIGHT_KEYS = ["warHit", "outsideHit", "bonusHit", "save", "duty"] as const;
+const WEIGHT_KEYS = ["warHit", "outsideHit", "save", "duty"] as const;
 const BOOL_KEYS = ["includeOutside", "includeDuty"] as const;
 
 // GET → { config, wars }  (+ report when ?war_id= is set)

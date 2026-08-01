@@ -13,9 +13,10 @@ interface War {
 interface ReportRow {
   member_id: number;
   name: string;
+  respect: number;
   war_hits: number;
   outside_hits: number;
-  bonus_hits: number;
+  retaliations: number;
   saves: number;
   save_seconds: number;
 }
@@ -24,7 +25,6 @@ interface Config {
   pool: number;
   warHit: number;
   outsideHit: number;
-  bonusHit: number;
   save: number;
   duty: number;
   includeOutside: boolean;
@@ -35,7 +35,6 @@ const DEFAULT: Config = {
   pool: 0,
   warHit: 0.3,
   outsideHit: 0.5,
-  bonusHit: 1,
   save: 0.4,
   duty: 0.2,
   includeOutside: true,
@@ -45,6 +44,9 @@ const DEFAULT: Config = {
 const fmtDate = (iso: string) =>
   new Date(iso).toLocaleDateString(undefined, { dateStyle: "medium" });
 const fmtPts = (n: number) => n.toLocaleString(undefined, { maximumFractionDigits: 1 });
+const fmtRespect = (n: number) => Number(n).toLocaleString(undefined, { maximumFractionDigits: 0 });
+const fmtDur = (s: number) =>
+  s >= 3600 ? `${(s / 3600).toFixed(1)}h` : s > 0 ? `${Math.round(s / 60)}m` : "—";
 
 export function WarPayoutPanel() {
   const [wars, setWars] = useState<War[]>([]);
@@ -92,7 +94,6 @@ export function WarPayoutPanel() {
       const points =
         config.warHit * Number(r.war_hits) +
         (config.includeOutside ? config.outsideHit * Number(r.outside_hits) : 0) +
-        config.bonusHit * Number(r.bonus_hits) +
         config.save * Number(r.saves) +
         (config.includeDuty ? config.duty * dutyHours : 0);
       return { ...r, dutyHours, points };
@@ -144,13 +145,14 @@ export function WarPayoutPanel() {
     const war = wars.find((w) => String(w.torn_war_id) === selected);
     const tag = war ? war.opponent_name.replace(/[^a-z0-9]+/gi, "-") : "all";
     const lines = [
-      "member,war_hits,outside_hits,bonus_hits,saves,duty_hours,points,share",
+      "member,respect,war_hits,outside_hits,retaliations,saves,duty_hours,points,share",
       ...rows.map((r) =>
         [
           `"${r.name}"`,
+          Math.round(Number(r.respect)),
           r.war_hits,
           r.outside_hits,
-          r.bonus_hits,
+          r.retaliations,
           r.saves,
           r.dutyHours.toFixed(2),
           r.points.toFixed(2),
@@ -257,7 +259,6 @@ export function WarPayoutPanel() {
         </p>
         <div className="mt-3 grid grid-cols-2 gap-4 sm:grid-cols-3">
           {weight("War hit", "warHit")}
-          {weight("Bonus hit", "bonusHit", "milestone hits (25/50/100…)")}
           {weight("Save", "save")}
           {togglableWeight("Outside hit", "outsideHit", "includeOutside", "non-war attacks")}
           {togglableWeight("Per hour on duty", "duty", "includeDuty", "save/availability time")}
@@ -306,11 +307,12 @@ export function WarPayoutPanel() {
               <thead className="text-xs uppercase text-neutral-500">
                 <tr>
                   <th className="py-1.5 pr-3">Member</th>
+                  <th className="py-1.5 pr-3">Respect</th>
                   <th className="py-1.5 pr-3">War hits</th>
-                  {config.includeOutside && <th className="py-1.5 pr-3">Outside</th>}
-                  <th className="py-1.5 pr-3">Bonus</th>
+                  <th className="py-1.5 pr-3">Outside</th>
+                  <th className="py-1.5 pr-3">Retals</th>
                   <th className="py-1.5 pr-3">Saves</th>
-                  {config.includeDuty && <th className="py-1.5 pr-3">Duty</th>}
+                  <th className="py-1.5 pr-3">Save time</th>
                   <th className="py-1.5 pr-3">Points</th>
                   <th className="py-1.5 pr-3">%</th>
                   <th className="py-1.5">Share</th>
@@ -320,17 +322,18 @@ export function WarPayoutPanel() {
                 {rows.map((r) => (
                   <tr key={r.member_id} className="border-t border-neutral-800">
                     <td className="py-2 pr-3 font-medium">{r.name}</td>
+                    <td className="py-2 pr-3 tabular-nums text-neutral-300">
+                      {fmtRespect(r.respect)}
+                    </td>
                     <td className="py-2 pr-3 tabular-nums text-neutral-400">{r.war_hits}</td>
-                    {config.includeOutside && (
-                      <td className="py-2 pr-3 tabular-nums text-neutral-400">{r.outside_hits}</td>
-                    )}
-                    <td className="py-2 pr-3 tabular-nums text-neutral-400">{r.bonus_hits}</td>
+                    <td className="py-2 pr-3 tabular-nums text-neutral-400">{r.outside_hits}</td>
+                    <td className="py-2 pr-3 tabular-nums text-sky-300">
+                      {Number(r.retaliations) || "—"}
+                    </td>
                     <td className="py-2 pr-3 tabular-nums text-emerald-400">{r.saves}</td>
-                    {config.includeDuty && (
-                      <td className="py-2 pr-3 tabular-nums text-neutral-400">
-                        {r.dutyHours.toFixed(1)}h
-                      </td>
-                    )}
+                    <td className="py-2 pr-3 tabular-nums text-neutral-400">
+                      {fmtDur(Number(r.save_seconds))}
+                    </td>
                     <td className="py-2 pr-3 tabular-nums text-neutral-300">{fmtPts(r.points)}</td>
                     <td className="py-2 pr-3 tabular-nums text-neutral-500">
                       {totalPoints > 0 ? ((r.points / totalPoints) * 100).toFixed(1) : "0"}%

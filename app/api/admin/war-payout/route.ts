@@ -4,7 +4,15 @@ import { forbidden, sessionMember, unauthorized } from "@/lib/session";
 
 // non-negative numeric knobs; pool + retalFixed are whole dollars, the rest
 // are ratios for the respect-pool / hit-pool split.
-const NUM_KEYS = ["pool", "retalFixed", "respectPct", "saveAsHits", "assistAsHits"] as const;
+const NUM_KEYS = [
+  "pool",
+  "retalFixed",
+  "respectPct",
+  "saveAsHits",
+  "assistAsHits",
+  "saveScore",
+  "assistScore",
+] as const;
 
 // GET → { config, wars }  (+ report when ?war_id= is set)
 export async function GET(req: Request) {

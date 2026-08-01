@@ -25,11 +25,15 @@ interface ReportRow {
 interface Config {
   pool: number;
   retalFixed: number;
-  // respect pool gets respectPct% of the leftover, the hit pool the rest;
-  // saves/assists count as fictional hits in the hit pool
+  // respect pool gets respectPct% of the leftover, the hit pool the rest
   respectPct: number;
+  // saves/assists draw from BOTH pools: a hit factor (fictional hits in the hit
+  // pool) and a score factor (fictional respect, in average-hit units, in the
+  // respect pool) — each tunable on its own
   saveAsHits: number;
   assistAsHits: number;
+  saveScore: number;
+  assistScore: number;
 }
 
 const DEFAULT: Config = {
@@ -38,6 +42,8 @@ const DEFAULT: Config = {
   respectPct: 75,
   saveAsHits: 1,
   assistAsHits: 1,
+  saveScore: 1,
+  assistScore: 1,
 };
 
 const fmtDate = (iso: string) =>
@@ -116,10 +122,13 @@ export function WarPayoutPanel() {
     const totalRespect = base.reduce((s, r) => s + r.respect, 0);
     const totalHits = base.reduce((s, r) => s + r.war_hits, 0);
     const respectPerHit = totalHits > 0 ? totalRespect / totalHits : 0;
+    // hit factor → hit pool; score factor → respect pool (in avg-hit respect)
     const ficHits = (r: (typeof base)[number]) =>
       config.saveAsHits * r.saves + config.assistAsHits * r.assists;
+    const ficRespect = (r: (typeof base)[number]) =>
+      respectPerHit * (config.saveScore * r.saves + config.assistScore * r.assists);
     const categories: { w: number; vals: number[] }[] = [
-      { w: pct, vals: base.map((r) => r.respect + respectPerHit * ficHits(r)) },
+      { w: pct, vals: base.map((r) => r.respect + ficRespect(r)) },
       { w: 100 - pct, vals: base.map((r) => r.war_hits + ficHits(r)) },
     ];
 
@@ -262,15 +271,20 @@ export function WarPayoutPanel() {
         <h3 className="font-bold">Payout weights</h3>
         <p className="mt-1 text-xs text-neutral-500">
           The leftover is split into a respect pool and a hit pool. Saves and assists draw from
-          BOTH as fictional war hits: each is worth N hits in the hit pool, plus the respect an
-          average war hit earned (× N) in the respect pool. Set N below.
+          BOTH: a <b>hit</b> factor (fictional hits in the hit pool) and a <b>score</b> factor
+          (fictional respect in the respect pool, measured in average-war-hit respect). Tune each
+          on its own.
         </p>
 
-        <div className="mt-3 grid grid-cols-2 gap-4 sm:grid-cols-4">
+        <div className="mt-3 grid grid-cols-2 gap-4 sm:grid-cols-3">
           {numInput("Retal payment ($ each)", "retalFixed", 50_000, "fixed, paid off the top")}
           {numInput("Respect pool %", "respectPct", 5, "hit pool gets the rest")}
-          {numInput("Save = N hits", "saveAsHits", 0.5)}
-          {numInput("Assist = N hits", "assistAsHits", 0.5)}
+          <div />
+          {numInput("Save → hits", "saveAsHits", 0.5, "in the hit pool")}
+          {numInput("Save → score", "saveScore", 0.5, "avg-hit respect, in the respect pool")}
+          <div />
+          {numInput("Assist → hits", "assistAsHits", 0.5, "in the hit pool")}
+          {numInput("Assist → score", "assistScore", 0.5, "avg-hit respect, in the respect pool")}
         </div>
 
         <div className="mt-4 flex flex-wrap items-center gap-3">

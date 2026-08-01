@@ -8,7 +8,7 @@ export function Nav({
   isAdmin,
   name,
 }: {
-  current: "live" | "duty" | "schedule" | "admin" | "wars" | "war-payout" | "payouts";
+  current: "live" | "duty" | "schedule" | "admin" | "war-payout" | "payouts";
   isAdmin: boolean;
   name: string;
 }) {
@@ -38,7 +38,6 @@ export function Nav({
       {tab("duty", "/duty", "My duty")}
       {tab("schedule", "/schedule", "Schedule")}
       {isAdmin && tab("admin", "/admin", "Admin")}
-      {isAdmin && tab("wars", "/admin/wars", "Wars")}
       {isAdmin && tab("war-payout", "/admin/war-payout", "War pay")}
       {isAdmin && tab("payouts", "/admin/payouts", "Payouts")}
       <div className="ml-auto flex items-center gap-3 text-sm text-neutral-500">

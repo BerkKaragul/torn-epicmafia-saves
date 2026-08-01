@@ -19,6 +19,7 @@ interface ReportRow {
   war_hits: number;
   outside_hits: number;
   bonus_hits: number;
+  retaliations: number;
   respect: number;
   saves: number;
   best_save_seconds: number | null;
@@ -66,10 +67,11 @@ export function WarsPanel() {
       war_hits: acc.war_hits + Number(r.war_hits),
       outside_hits: acc.outside_hits + Number(r.outside_hits),
       bonus_hits: acc.bonus_hits + Number(r.bonus_hits),
+      retaliations: acc.retaliations + Number(r.retaliations),
       saves: acc.saves + Number(r.saves),
       save_seconds: acc.save_seconds + Number(r.save_seconds),
     }),
-    { war_hits: 0, outside_hits: 0, bonus_hits: 0, saves: 0, save_seconds: 0 },
+    { war_hits: 0, outside_hits: 0, bonus_hits: 0, retaliations: 0, saves: 0, save_seconds: 0 },
   );
 
   return (
@@ -77,9 +79,11 @@ export function WarsPanel() {
       <section className="rounded-xl border border-neutral-800 bg-neutral-900 p-5">
         <h2 className="font-bold">War reports</h2>
         <p className="mt-1 text-xs text-neutral-500">
-          War hits, outside hits and bonus hits come from Torn&apos;s own chain reports (pulled
-          once each chain ends). Saves are ChainWatch&apos;s — hits landed under the save timer by
-          the saver whose turn it was.
+          War hits come from Torn&apos;s ranked war report (the full count, incl. hits outside
+          chains — synced once the war ends). Outside hits, bonus hits and retaliations come from
+          the chain reports; retaliations overlap war/outside hits, so they&apos;re a breakdown, not
+          added on top. Saves are ChainWatch&apos;s — hits landed under the save timer by the saver
+          whose turn it was.
         </p>
         <div className="mt-3 flex flex-wrap items-center gap-3">
           <select
@@ -128,7 +132,8 @@ export function WarsPanel() {
             <span className="text-sm text-neutral-500">
               {totals.war_hits.toLocaleString()} war hits ·{" "}
               {totals.outside_hits.toLocaleString()} outside ·{" "}
-              {totals.bonus_hits.toLocaleString()} bonus · {totals.saves.toLocaleString()} saves ·{" "}
+              {totals.bonus_hits.toLocaleString()} bonus ·{" "}
+              {totals.retaliations.toLocaleString()} retals · {totals.saves.toLocaleString()} saves ·{" "}
               {fmtDur(totals.save_seconds)} on duty
             </span>
           )}
@@ -149,6 +154,7 @@ export function WarsPanel() {
                   <th className="py-1.5 pr-3">War hits</th>
                   <th className="py-1.5 pr-3">Outside hits</th>
                   <th className="py-1.5 pr-3">Bonus hits</th>
+                  <th className="py-1.5 pr-3">Retals</th>
                   <th className="py-1.5 pr-3">Saves</th>
                   <th className="py-1.5 pr-3">Save time</th>
                   <th className="py-1.5 pr-3">Best save</th>
@@ -165,6 +171,9 @@ export function WarsPanel() {
                     </td>
                     <td className="py-2 pr-3 tabular-nums text-amber-300">
                       {Number(r.bonus_hits) || "—"}
+                    </td>
+                    <td className="py-2 pr-3 tabular-nums text-sky-300">
+                      {Number(r.retaliations) || "—"}
                     </td>
                     <td className="py-2 pr-3 font-bold tabular-nums text-emerald-400">
                       {Number(r.saves) || "—"}

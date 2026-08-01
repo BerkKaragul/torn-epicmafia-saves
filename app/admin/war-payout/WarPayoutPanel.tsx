@@ -15,38 +15,46 @@ interface ReportRow {
   name: string;
   respect: number;
   war_hits: number;
-  outside_hits: number;
   retaliations: number;
+  assists: number;
   saves: number;
   save_seconds: number;
+  chain_pay: number;
 }
 
+type Model = "weighted" | "split";
+
 interface Config {
+  model: Model;
   pool: number;
-  warHit: number;
-  outsideHit: number;
-  save: number;
-  duty: number;
-  includeOutside: boolean;
-  includeDuty: boolean;
+  retalFixed: number;
+  // model "weighted" — one pool, everything weighted together
+  wScore: number;
+  wHit: number;
+  wSave: number;
+  wAssist: number;
+  // model "split" — respect pool + hit pool, saves/assists count as hits
+  respectPct: number;
+  saveAsHits: number;
+  assistAsHits: number;
 }
 
 const DEFAULT: Config = {
+  model: "weighted",
   pool: 0,
-  warHit: 0.3,
-  outsideHit: 0.5,
-  save: 0.4,
-  duty: 0.2,
-  includeOutside: true,
-  includeDuty: true,
+  retalFixed: 900_000,
+  wScore: 3,
+  wHit: 1,
+  wSave: 4,
+  wAssist: 2,
+  respectPct: 75,
+  saveAsHits: 1,
+  assistAsHits: 1,
 };
 
 const fmtDate = (iso: string) =>
   new Date(iso).toLocaleDateString(undefined, { dateStyle: "medium" });
-const fmtPts = (n: number) => n.toLocaleString(undefined, { maximumFractionDigits: 1 });
-const fmtRespect = (n: number) => Number(n).toLocaleString(undefined, { maximumFractionDigits: 0 });
-const fmtDur = (s: number) =>
-  s >= 3600 ? `${(s / 3600).toFixed(1)}h` : s > 0 ? `${Math.round(s / 60)}m` : "—";
+const fmtNum = (n: number) => Number(n).toLocaleString(undefined, { maximumFractionDigits: 0 });
 
 export function WarPayoutPanel() {
   const [wars, setWars] = useState<War[]>([]);
@@ -86,45 +94,74 @@ export function WarPayoutPanel() {
   const setNum = (k: keyof Config) => (v: string) =>
     setConfig((c) => ({ ...c, [k]: v === "" ? 0 : Number(v) }));
 
-  // points per member, then split the pool proportionally. Uses largest-
-  // remainder so the shares sum EXACTLY to the pool (no lost/created cents).
-  const { rows, totalPoints, distributed } = useMemo(() => {
-    const scored = report.map((r) => {
-      const dutyHours = Number(r.save_seconds) / 3600;
-      const points =
-        config.warHit * Number(r.war_hits) +
-        (config.includeOutside ? config.outsideHit * Number(r.outside_hits) : 0) +
-        config.save * Number(r.saves) +
-        (config.includeDuty ? config.duty * dutyHours : 0);
-      return { ...r, dutyHours, points };
-    });
+  // Each member's total = chain-hour pay + retal pay (fixed each) + a share of
+  // what's left of the prize. The two models differ only in how that leftover
+  // is split. Largest-remainder keeps the shares summing to the leftover exactly.
+  const { rows, sumChain, sumRetal, distributable, prize } = useMemo(() => {
+    const prize = Math.max(0, Math.round(config.pool));
+    const retalFixed = Math.max(0, config.retalFixed);
 
-    const total = scored.reduce((s, r) => s + r.points, 0);
-    const pool = Math.max(0, Math.round(config.pool));
+    const base = report.map((r) => ({
+      member_id: r.member_id,
+      name: r.name,
+      respect: Number(r.respect),
+      war_hits: Number(r.war_hits),
+      retaliations: Number(r.retaliations),
+      assists: Number(r.assists),
+      saves: Number(r.saves),
+      chainPay: Math.round(Number(r.chain_pay)),
+      retalPay: Math.round(Number(r.retaliations) * retalFixed),
+    }));
 
-    let withShares = scored.map((r) => ({ ...r, share: 0, exact: 0, floor: 0 }));
-    if (total > 0 && pool > 0) {
-      withShares = scored.map((r) => {
-        const exact = (r.points / total) * pool;
-        return { ...r, exact, floor: Math.floor(exact), share: Math.floor(exact) };
-      });
-      let leftover = pool - withShares.reduce((s, r) => s + r.floor, 0);
-      // hand the rounding remainder to the biggest fractional parts first
-      const order = [...withShares]
-        .map((r, i) => ({ i, frac: r.exact - r.floor }))
-        .sort((a, b) => b.frac - a.frac);
-      for (let j = 0; j < leftover; j++) withShares[order[j % order.length].i].share += 1;
+    const sumChain = base.reduce((s, r) => s + r.chainPay, 0);
+    const sumRetal = base.reduce((s, r) => s + r.retalPay, 0);
+    const distributable = Math.max(0, prize - sumChain - sumRetal);
+
+    // exact (float) share per member under the chosen model
+    let shares: number[];
+    if (config.model === "weighted") {
+      const pts = base.map(
+        (r) =>
+          config.wScore * r.respect +
+          config.wHit * r.war_hits +
+          config.wSave * r.saves +
+          config.wAssist * r.assists,
+      );
+      const tp = pts.reduce((a, b) => a + b, 0);
+      shares = pts.map((p) => (tp > 0 ? (p / tp) * distributable : 0));
+    } else {
+      const respectPool = distributable * (Math.min(100, Math.max(0, config.respectPct)) / 100);
+      const hitPool = distributable - respectPool;
+      const sumResp = base.reduce((s, r) => s + r.respect, 0);
+      const fic = base.map(
+        (r) => r.war_hits + config.saveAsHits * r.saves + config.assistAsHits * r.assists,
+      );
+      const sumFic = fic.reduce((a, b) => a + b, 0);
+      shares = base.map(
+        (r, i) =>
+          (sumResp > 0 ? (r.respect / sumResp) * respectPool : 0) +
+          (sumFic > 0 ? (fic[i] / sumFic) * hitPool : 0),
+      );
     }
 
-    return {
-      rows: withShares
-        .filter((r) => r.points > 0)
-        .sort((a, b) => b.share - a.share || b.points - a.points),
-      totalPoints: total,
-      distributed: withShares.reduce((s, r) => s + r.share, 0),
-    };
+    // largest-remainder rounding so integer shares add up to `distributable`
+    const floors = shares.map(Math.floor);
+    const left = distributable - floors.reduce((a, b) => a + b, 0);
+    const order = shares
+      .map((s, i) => ({ i, frac: s - Math.floor(s) }))
+      .sort((a, b) => b.frac - a.frac);
+    const shareInt = floors.slice();
+    for (let j = 0; j < left; j++) shareInt[order[j % order.length].i] += 1;
+
+    const rows = base
+      .map((r, i) => ({ ...r, share: shareInt[i], total: r.chainPay + r.retalPay + shareInt[i] }))
+      .filter((r) => r.total > 0)
+      .sort((a, b) => b.total - a.total);
+
+    return { rows, sumChain, sumRetal, distributable, prize };
   }, [report, config]);
 
+  const overspent = prize > 0 && sumChain + sumRetal > prize;
   const dirty = JSON.stringify(config) !== JSON.stringify(savedConfig);
 
   async function saveDefaults() {
@@ -145,18 +182,19 @@ export function WarPayoutPanel() {
     const war = wars.find((w) => String(w.torn_war_id) === selected);
     const tag = war ? war.opponent_name.replace(/[^a-z0-9]+/gi, "-") : "all";
     const lines = [
-      "member,respect,war_hits,outside_hits,retaliations,saves,duty_hours,points,share",
+      "member,respect,war_hits,retals,saves,assists,chain_pay,retal_pay,war_share,total",
       ...rows.map((r) =>
         [
           `"${r.name}"`,
-          Math.round(Number(r.respect)),
+          Math.round(r.respect),
           r.war_hits,
-          r.outside_hits,
           r.retaliations,
           r.saves,
-          r.dutyHours.toFixed(2),
-          r.points.toFixed(2),
+          r.assists,
+          r.chainPay,
+          r.retalPay,
           r.share,
+          r.total,
         ].join(","),
       ),
     ];
@@ -169,13 +207,13 @@ export function WarPayoutPanel() {
     URL.revokeObjectURL(url);
   }
 
-  const weight = (label: string, k: keyof Config, hint?: string) => (
+  const numInput = (label: string, k: keyof Config, step: number, hint?: string) => (
     <label className="text-sm">
       <span className="text-neutral-400">{label}</span>
       <input
         type="number"
         min={0}
-        step={0.1}
+        step={step}
         value={config[k] as number}
         onChange={(e) => setNum(k)(e.target.value)}
         className="mt-1 w-full rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1.5 tabular-nums"
@@ -184,42 +222,13 @@ export function WarPayoutPanel() {
     </label>
   );
 
-  const togglableWeight = (
-    label: string,
-    k: keyof Config,
-    toggleKey: "includeOutside" | "includeDuty",
-    hint: string,
-  ) => (
-    <label className="text-sm">
-      <span className="flex items-center gap-2 text-neutral-400">
-        <input
-          type="checkbox"
-          checked={config[toggleKey]}
-          onChange={(e) => setConfig((c) => ({ ...c, [toggleKey]: e.target.checked }))}
-        />
-        {label}
-      </span>
-      <input
-        type="number"
-        min={0}
-        step={0.1}
-        value={config[k] as number}
-        disabled={!config[toggleKey]}
-        onChange={(e) => setNum(k)(e.target.value)}
-        className="mt-1 w-full rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1.5 tabular-nums disabled:opacity-40"
-      />
-      <span className="mt-0.5 block text-xs text-neutral-600">{hint}</span>
-    </label>
-  );
-
   return (
     <div className="flex flex-col gap-6">
       <section className="rounded-xl border border-neutral-800 bg-neutral-900 p-5">
         <h2 className="font-bold">War payout calculator</h2>
         <p className="mt-1 text-xs text-neutral-500">
-          Enter the total prize pool for the war. The weights below turn each stat into points
-          (they don&apos;t need to add up to anything); everyone gets a share of the pool
-          proportional to their points. Shares always add up to exactly the pool.
+          Total earnings per member = their chain-hour pay + retal pay (a fixed amount per retal) +
+          a share of what&apos;s left of the prize pool. Pick how the leftover is split below.
         </p>
 
         <div className="mt-4 flex flex-wrap items-end gap-4">
@@ -253,16 +262,54 @@ export function WarPayoutPanel() {
       </section>
 
       <section className="rounded-xl border border-neutral-800 bg-neutral-900 p-5">
-        <h3 className="font-bold">Point weights</h3>
-        <p className="mt-1 text-xs text-neutral-500">
-          Points per unit. e.g. war hit 0.3 means every war hit is worth 0.3 points.
-        </p>
-        <div className="mt-3 grid grid-cols-2 gap-4 sm:grid-cols-3">
-          {weight("War hit", "warHit")}
-          {weight("Save", "save")}
-          {togglableWeight("Outside hit", "outsideHit", "includeOutside", "non-war attacks")}
-          {togglableWeight("Per hour on duty", "duty", "includeDuty", "save/availability time")}
+        <div className="flex flex-wrap items-center gap-2">
+          <h3 className="font-bold">Split model</h3>
+          <div className="ml-2 flex rounded-md border border-neutral-700 p-0.5 text-sm">
+            {(
+              [
+                ["weighted", "Weighted pool"],
+                ["split", "Respect 75 / Hit 25"],
+              ] as [Model, string][]
+            ).map(([m, label]) => (
+              <button
+                key={m}
+                onClick={() => setConfig((c) => ({ ...c, model: m }))}
+                className={`rounded px-3 py-1 font-medium transition ${
+                  config.model === m
+                    ? "bg-emerald-700 text-white"
+                    : "text-neutral-400 hover:text-neutral-200"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
+
+        <p className="mt-2 text-xs text-neutral-500">
+          {config.model === "weighted"
+            ? "One pool. Everyone's points = score·respect + hits + saves + assists (each weighted below); the leftover is shared by points. Note: respect is much larger than the hit counts, so it dominates."
+            : "Two pools of the leftover: a respect pool (shared by respect) and a hit pool (shared by war hits, with saves and assists counted as extra hits)."}
+        </p>
+
+        <div className="mt-3 grid grid-cols-2 gap-4 sm:grid-cols-4">
+          {numInput("Retal payment ($ each)", "retalFixed", 50_000, "fixed, paid off the top")}
+          {config.model === "weighted" ? (
+            <>
+              {numInput("Score (respect) weight", "wScore", 0.5)}
+              {numInput("Hit weight", "wHit", 0.5)}
+              {numInput("Save weight", "wSave", 0.5)}
+              {numInput("Assist weight", "wAssist", 0.5)}
+            </>
+          ) : (
+            <>
+              {numInput("Respect pool %", "respectPct", 5, "hit pool gets the rest")}
+              {numInput("Save = N hits", "saveAsHits", 0.5)}
+              {numInput("Assist = N hits", "assistAsHits", 0.5)}
+            </>
+          )}
+        </div>
+
         <div className="mt-4 flex flex-wrap items-center gap-3">
           <button
             onClick={saveDefaults}
@@ -277,12 +324,13 @@ export function WarPayoutPanel() {
 
       <section className="rounded-xl border border-neutral-800 bg-neutral-900 p-5">
         <div className="flex flex-wrap items-baseline gap-3">
-          <h3 className="font-bold">Split</h3>
+          <h3 className="font-bold">Payout</h3>
           <span className="text-lg font-black tabular-nums text-emerald-400">
-            {fmtMoney(distributed)}
+            {fmtMoney(sumChain + sumRetal + distributable)}
           </span>
           <span className="text-sm text-neutral-500">
-            across {rows.length} member(s) · {fmtPts(totalPoints)} total points
+            across {rows.length} member(s) · chain {fmtMoney(sumChain)} + retals{" "}
+            {fmtMoney(sumRetal)} + split {fmtMoney(distributable)}
           </span>
           <button
             onClick={exportCsv}
@@ -293,14 +341,19 @@ export function WarPayoutPanel() {
           </button>
         </div>
 
+        {overspent && (
+          <p className="mt-2 text-sm text-red-400">
+            ⚠ Chain pay + retals ({fmtMoney(sumChain + sumRetal)}) already exceed the pool — there&apos;s
+            nothing left to split. Raise the pool or lower the retal amount.
+          </p>
+        )}
+
         {loading ? (
           <p className="mt-3 text-sm text-neutral-500">Loading…</p>
         ) : config.pool <= 0 ? (
-          <p className="mt-3 text-sm text-amber-400">Enter a total pool above to split it.</p>
+          <p className="mt-3 text-sm text-amber-400">Enter a total pool above to calculate.</p>
         ) : rows.length === 0 ? (
-          <p className="mt-3 text-sm text-neutral-500">
-            No points for this war yet — set some weights, or the report has no stats.
-          </p>
+          <p className="mt-3 text-sm text-neutral-500">Nothing to pay for this war yet.</p>
         ) : (
           <div className="mt-3 overflow-x-auto">
             <table className="w-full text-left text-sm">
@@ -308,37 +361,31 @@ export function WarPayoutPanel() {
                 <tr>
                   <th className="py-1.5 pr-3">Member</th>
                   <th className="py-1.5 pr-3">Respect</th>
-                  <th className="py-1.5 pr-3">War hits</th>
-                  <th className="py-1.5 pr-3">Outside</th>
+                  <th className="py-1.5 pr-3">Hits</th>
                   <th className="py-1.5 pr-3">Retals</th>
                   <th className="py-1.5 pr-3">Saves</th>
-                  <th className="py-1.5 pr-3">Save time</th>
-                  <th className="py-1.5 pr-3">Points</th>
-                  <th className="py-1.5 pr-3">%</th>
-                  <th className="py-1.5">Share</th>
+                  <th className="py-1.5 pr-3">Assists</th>
+                  <th className="py-1.5 pr-3">Chain $</th>
+                  <th className="py-1.5 pr-3">Retal $</th>
+                  <th className="py-1.5 pr-3">Split $</th>
+                  <th className="py-1.5">Total</th>
                 </tr>
               </thead>
               <tbody>
                 {rows.map((r) => (
                   <tr key={r.member_id} className="border-t border-neutral-800">
                     <td className="py-2 pr-3 font-medium">{r.name}</td>
-                    <td className="py-2 pr-3 tabular-nums text-neutral-300">
-                      {fmtRespect(r.respect)}
-                    </td>
+                    <td className="py-2 pr-3 tabular-nums text-neutral-400">{fmtNum(r.respect)}</td>
                     <td className="py-2 pr-3 tabular-nums text-neutral-400">{r.war_hits}</td>
-                    <td className="py-2 pr-3 tabular-nums text-neutral-400">{r.outside_hits}</td>
-                    <td className="py-2 pr-3 tabular-nums text-sky-300">
-                      {Number(r.retaliations) || "—"}
+                    <td className="py-2 pr-3 tabular-nums text-sky-300">{r.retaliations || "—"}</td>
+                    <td className="py-2 pr-3 tabular-nums text-emerald-400">{r.saves || "—"}</td>
+                    <td className="py-2 pr-3 tabular-nums text-neutral-400">{r.assists || "—"}</td>
+                    <td className="py-2 pr-3 tabular-nums text-neutral-500">{fmtMoney(r.chainPay)}</td>
+                    <td className="py-2 pr-3 tabular-nums text-neutral-500">{fmtMoney(r.retalPay)}</td>
+                    <td className="py-2 pr-3 tabular-nums text-neutral-300">{fmtMoney(r.share)}</td>
+                    <td className="py-2 font-bold tabular-nums text-emerald-300">
+                      {fmtMoney(r.total)}
                     </td>
-                    <td className="py-2 pr-3 tabular-nums text-emerald-400">{r.saves}</td>
-                    <td className="py-2 pr-3 tabular-nums text-neutral-400">
-                      {fmtDur(Number(r.save_seconds))}
-                    </td>
-                    <td className="py-2 pr-3 tabular-nums text-neutral-300">{fmtPts(r.points)}</td>
-                    <td className="py-2 pr-3 tabular-nums text-neutral-500">
-                      {totalPoints > 0 ? ((r.points / totalPoints) * 100).toFixed(1) : "0"}%
-                    </td>
-                    <td className="py-2 font-bold tabular-nums">{fmtMoney(r.share)}</td>
                   </tr>
                 ))}
               </tbody>

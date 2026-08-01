@@ -920,6 +920,7 @@ async function syncChainReports(db: SupabaseClient, torn: TornClient): Promise<v
         attacks_war: a.attacks.war,
         attacks_overseas: a.attacks.overseas,
         retaliations: a.attacks.retaliations,
+        assists: a.attacks.assists,
         bonuses: a.attacks.bonuses,
         respect: a.respect.total,
       }));

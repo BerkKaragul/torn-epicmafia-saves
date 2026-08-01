@@ -2,9 +2,19 @@ import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { forbidden, sessionMember, unauthorized } from "@/lib/session";
 
-// weights are point multipliers (small decimals); pool is a whole-dollar prize
-const WEIGHT_KEYS = ["warHit", "outsideHit", "save", "duty"] as const;
-const BOOL_KEYS = ["includeOutside", "includeDuty"] as const;
+// non-negative numeric knobs; pool + retalFixed are whole dollars, the rest
+// are weights/ratios. Model picks how the leftover pool is split.
+const NUM_KEYS = [
+  "pool",
+  "retalFixed",
+  "wScore",
+  "wHit",
+  "wSave",
+  "wAssist",
+  "respectPct",
+  "saveAsHits",
+  "assistAsHits",
+] as const;
 
 // GET → { config, wars }  (+ report when ?war_id= is set)
 export async function GET(req: Request) {
@@ -55,22 +65,18 @@ export async function PATCH(req: Request) {
     return NextResponse.json({ error: "Bad request" }, { status: 400 });
   }
 
-  const config: Record<string, number | boolean> = {};
+  const config: Record<string, number | string> = {};
 
-  const pool = Number(body.pool);
-  if (!Number.isFinite(pool) || pool < 0) {
-    return NextResponse.json({ error: "Invalid pool amount" }, { status: 400 });
-  }
-  config.pool = Math.round(pool);
+  config.model = body.model === "split" ? "split" : "weighted";
 
-  for (const k of WEIGHT_KEYS) {
+  for (const k of NUM_KEYS) {
     const n = Number(body[k]);
     if (!Number.isFinite(n) || n < 0) {
-      return NextResponse.json({ error: `Invalid weight for ${k}` }, { status: 400 });
+      return NextResponse.json({ error: `Invalid value for ${k}` }, { status: 400 });
     }
-    config[k] = n; // keep decimals — these are point multipliers
+    // pool and the fixed retal amount are whole dollars; the rest keep decimals
+    config[k] = k === "pool" || k === "retalFixed" ? Math.round(n) : n;
   }
-  for (const k of BOOL_KEYS) config[k] = Boolean(body[k]);
 
   const { error } = await db()
     .from("settings")

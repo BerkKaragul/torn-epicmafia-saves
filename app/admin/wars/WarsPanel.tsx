@@ -20,6 +20,7 @@ interface ReportRow {
   war_hits: number;
   outside_hits: number;
   retaliations: number;
+  assists: number;
   saves: number;
   save_seconds: number;
 }
@@ -68,10 +69,19 @@ export function WarsPanel() {
       war_hits: acc.war_hits + Number(r.war_hits),
       outside_hits: acc.outside_hits + Number(r.outside_hits),
       retaliations: acc.retaliations + Number(r.retaliations),
+      assists: acc.assists + Number(r.assists),
       saves: acc.saves + Number(r.saves),
       save_seconds: acc.save_seconds + Number(r.save_seconds),
     }),
-    { respect: 0, war_hits: 0, outside_hits: 0, retaliations: 0, saves: 0, save_seconds: 0 },
+    {
+      respect: 0,
+      war_hits: 0,
+      outside_hits: 0,
+      retaliations: 0,
+      assists: 0,
+      saves: 0,
+      save_seconds: 0,
+    },
   );
 
   return (
@@ -133,7 +143,8 @@ export function WarsPanel() {
               {fmtRespect(totals.respect)} respect ·{" "}
               {totals.war_hits.toLocaleString()} war hits ·{" "}
               {totals.outside_hits.toLocaleString()} outside ·{" "}
-              {totals.retaliations.toLocaleString()} retals · {totals.saves.toLocaleString()} saves ·{" "}
+              {totals.retaliations.toLocaleString()} retals ·{" "}
+              {totals.assists.toLocaleString()} assists · {totals.saves.toLocaleString()} saves ·{" "}
               {fmtDur(totals.save_seconds)} on duty
             </span>
           )}
@@ -155,6 +166,7 @@ export function WarsPanel() {
                   <th className="py-1.5 pr-3">War hits</th>
                   <th className="py-1.5 pr-3">Outside hits</th>
                   <th className="py-1.5 pr-3">Retals</th>
+                  <th className="py-1.5 pr-3">Assists</th>
                   <th className="py-1.5 pr-3">Saves</th>
                   <th className="py-1.5">Save time</th>
                 </tr>
@@ -172,6 +184,9 @@ export function WarsPanel() {
                     </td>
                     <td className="py-2 pr-3 tabular-nums text-sky-300">
                       {Number(r.retaliations) || "—"}
+                    </td>
+                    <td className="py-2 pr-3 tabular-nums text-neutral-400">
+                      {Number(r.assists) || "—"}
                     </td>
                     <td className="py-2 pr-3 font-bold tabular-nums text-emerald-400">
                       {Number(r.saves) || "—"}

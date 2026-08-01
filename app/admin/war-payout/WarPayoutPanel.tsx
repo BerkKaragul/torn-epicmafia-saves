@@ -108,18 +108,19 @@ export function WarPayoutPanel() {
     const sumRetal = base.reduce((s, r) => s + r.retalPay, 0);
     const distributable = Math.max(0, prize - sumChain - sumRetal);
 
-    // Two category pools of the leftover: a respect pool (respectPct%) shared by
-    // respect, and a hit pool (the rest) shared by war hits — with saves and
-    // assists folded in as fictional hits.
+    // Two category pools of the leftover: a respect pool (respectPct%) and a hit
+    // pool (the rest). Saves and assists draw from BOTH — each is a fictional war
+    // hit: it counts as N hits in the hit pool, and carries a fictional respect
+    // score (N × the respect an average war hit earned) in the respect pool.
     const pct = Math.min(100, Math.max(0, config.respectPct));
+    const totalRespect = base.reduce((s, r) => s + r.respect, 0);
+    const totalHits = base.reduce((s, r) => s + r.war_hits, 0);
+    const respectPerHit = totalHits > 0 ? totalRespect / totalHits : 0;
+    const ficHits = (r: (typeof base)[number]) =>
+      config.saveAsHits * r.saves + config.assistAsHits * r.assists;
     const categories: { w: number; vals: number[] }[] = [
-      { w: pct, vals: base.map((r) => r.respect) },
-      {
-        w: 100 - pct,
-        vals: base.map(
-          (r) => r.war_hits + config.saveAsHits * r.saves + config.assistAsHits * r.assists,
-        ),
-      },
+      { w: pct, vals: base.map((r) => r.respect + respectPerHit * ficHits(r)) },
+      { w: 100 - pct, vals: base.map((r) => r.war_hits + ficHits(r)) },
     ];
 
     // only categories with a positive weight AND something to divide take a cut
@@ -260,9 +261,9 @@ export function WarPayoutPanel() {
       <section className="rounded-xl border border-neutral-800 bg-neutral-900 p-5">
         <h3 className="font-bold">Payout weights</h3>
         <p className="mt-1 text-xs text-neutral-500">
-          The leftover is split into a respect pool (shared by respect) and a hit pool (shared by
-          war hits). Saves and assists count as fictional hits in the hit pool — set how many hits
-          each is worth.
+          The leftover is split into a respect pool and a hit pool. Saves and assists draw from
+          BOTH as fictional war hits: each is worth N hits in the hit pool, plus the respect an
+          average war hit earned (× N) in the respect pool. Set N below.
         </p>
 
         <div className="mt-3 grid grid-cols-2 gap-4 sm:grid-cols-4">

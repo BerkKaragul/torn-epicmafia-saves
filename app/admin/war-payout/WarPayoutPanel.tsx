@@ -95,9 +95,13 @@ export function WarPayoutPanel() {
     setConfig((c) => ({ ...c, [k]: v === "" ? 0 : Number(v) }));
 
   // Each member's total = chain-hour pay + retal pay (fixed each) + a share of
-  // what's left of the prize. The two models differ only in how that leftover
-  // is split. Largest-remainder keeps the shares summing to the leftover exactly.
-  const { rows, sumChain, sumRetal, distributable, prize } = useMemo(() => {
+  // what's left of the prize. Both models use the SAME mechanism: each stat is
+  // its own "category pool" — normalised WITHIN the category, then the weights
+  // decide what fraction of the leftover each category commands (score weight 3
+  // + hit 1 + save 4 + assist 2 → score gets 3/10 of the pool, etc.). Empty
+  // categories are dropped so nothing is lost. Largest-remainder keeps the
+  // integer shares summing exactly to what was actually distributed.
+  const { rows, sumChain, sumRetal, distributed, prize } = useMemo(() => {
     const prize = Math.max(0, Math.round(config.pool));
     const retalFixed = Math.max(0, config.retalFixed);
 
@@ -117,48 +121,60 @@ export function WarPayoutPanel() {
     const sumRetal = base.reduce((s, r) => s + r.retalPay, 0);
     const distributable = Math.max(0, prize - sumChain - sumRetal);
 
-    // exact (float) share per member under the chosen model
-    let shares: number[];
-    if (config.model === "weighted") {
-      const pts = base.map(
-        (r) =>
-          config.wScore * r.respect +
-          config.wHit * r.war_hits +
-          config.wSave * r.saves +
-          config.wAssist * r.assists,
-      );
-      const tp = pts.reduce((a, b) => a + b, 0);
-      shares = pts.map((p) => (tp > 0 ? (p / tp) * distributable : 0));
-    } else {
-      const respectPool = distributable * (Math.min(100, Math.max(0, config.respectPct)) / 100);
-      const hitPool = distributable - respectPool;
-      const sumResp = base.reduce((s, r) => s + r.respect, 0);
-      const fic = base.map(
-        (r) => r.war_hits + config.saveAsHits * r.saves + config.assistAsHits * r.assists,
-      );
-      const sumFic = fic.reduce((a, b) => a + b, 0);
-      shares = base.map(
-        (r, i) =>
-          (sumResp > 0 ? (r.respect / sumResp) * respectPool : 0) +
-          (sumFic > 0 ? (fic[i] / sumFic) * hitPool : 0),
-      );
+    // categories: [weight, per-member values]. Split model folds saves/assists
+    // into the hit category as fictional hits, per the admin's version.
+    const pct = Math.min(100, Math.max(0, config.respectPct));
+    const categories: { w: number; vals: number[] }[] =
+      config.model === "weighted"
+        ? [
+            { w: config.wScore, vals: base.map((r) => r.respect) },
+            { w: config.wHit, vals: base.map((r) => r.war_hits) },
+            { w: config.wSave, vals: base.map((r) => r.saves) },
+            { w: config.wAssist, vals: base.map((r) => r.assists) },
+          ]
+        : [
+            { w: pct, vals: base.map((r) => r.respect) },
+            {
+              w: 100 - pct,
+              vals: base.map(
+                (r) => r.war_hits + config.saveAsHits * r.saves + config.assistAsHits * r.assists,
+              ),
+            },
+          ];
+
+    // only categories with a positive weight AND something to divide take a cut
+    const active = categories
+      .map((c) => ({ ...c, total: c.vals.reduce((a, b) => a + b, 0) }))
+      .filter((c) => c.w > 0 && c.total > 0);
+    const wTotal = active.reduce((s, c) => s + c.w, 0);
+
+    const shares = base.map(() => 0);
+    if (wTotal > 0) {
+      for (const c of active) {
+        const catPool = (c.w / wTotal) * distributable;
+        base.forEach((_, i) => {
+          shares[i] += (c.vals[i] / c.total) * catPool;
+        });
+      }
     }
 
-    // largest-remainder rounding so integer shares add up to `distributable`
+    // largest-remainder rounding to the integer total we actually distributed
+    const targetInt = Math.round(shares.reduce((a, b) => a + b, 0));
     const floors = shares.map(Math.floor);
-    const left = distributable - floors.reduce((a, b) => a + b, 0);
+    const left = targetInt - floors.reduce((a, b) => a + b, 0);
     const order = shares
       .map((s, i) => ({ i, frac: s - Math.floor(s) }))
       .sort((a, b) => b.frac - a.frac);
     const shareInt = floors.slice();
-    for (let j = 0; j < left; j++) shareInt[order[j % order.length].i] += 1;
+    for (let j = 0; j < left && order.length > 0; j++) shareInt[order[j % order.length].i] += 1;
 
     const rows = base
       .map((r, i) => ({ ...r, share: shareInt[i], total: r.chainPay + r.retalPay + shareInt[i] }))
       .filter((r) => r.total > 0)
       .sort((a, b) => b.total - a.total);
 
-    return { rows, sumChain, sumRetal, distributable, prize };
+    const distributed = shareInt.reduce((a, b) => a + b, 0);
+    return { rows, sumChain, sumRetal, distributed, prize };
   }, [report, config]);
 
   const overspent = prize > 0 && sumChain + sumRetal > prize;
@@ -288,8 +304,8 @@ export function WarPayoutPanel() {
 
         <p className="mt-2 text-xs text-neutral-500">
           {config.model === "weighted"
-            ? "One pool. Everyone's points = score·respect + hits + saves + assists (each weighted below); the leftover is shared by points. Note: respect is much larger than the hit counts, so it dominates."
-            : "Two pools of the leftover: a respect pool (shared by respect) and a hit pool (shared by war hits, with saves and assists counted as extra hits)."}
+            ? "Four category pools. The weights below set each category's share of the leftover (e.g. 3/1/4/2 → score gets 3/10, hits 1/10, saves 4/10, assists 2/10). Each category is shared out within itself, so raw sizes don't matter — respect never drowns out hits."
+            : "Two category pools of the leftover: a respect pool (shared by respect) and a hit pool (shared by war hits, with saves and assists counted as extra hits)."}
         </p>
 
         <div className="mt-3 grid grid-cols-2 gap-4 sm:grid-cols-4">
@@ -326,11 +342,11 @@ export function WarPayoutPanel() {
         <div className="flex flex-wrap items-baseline gap-3">
           <h3 className="font-bold">Payout</h3>
           <span className="text-lg font-black tabular-nums text-emerald-400">
-            {fmtMoney(sumChain + sumRetal + distributable)}
+            {fmtMoney(sumChain + sumRetal + distributed)}
           </span>
           <span className="text-sm text-neutral-500">
             across {rows.length} member(s) · chain {fmtMoney(sumChain)} + retals{" "}
-            {fmtMoney(sumRetal)} + split {fmtMoney(distributable)}
+            {fmtMoney(sumRetal)} + split {fmtMoney(distributed)}
           </span>
           <button
             onClick={exportCsv}

@@ -22,31 +22,19 @@ interface ReportRow {
   chain_pay: number;
 }
 
-type Model = "weighted" | "split";
-
 interface Config {
-  model: Model;
   pool: number;
   retalFixed: number;
-  // model "weighted" — one pool, everything weighted together
-  wScore: number;
-  wHit: number;
-  wSave: number;
-  wAssist: number;
-  // model "split" — respect pool + hit pool, saves/assists count as hits
+  // respect pool gets respectPct% of the leftover, the hit pool the rest;
+  // saves/assists count as fictional hits in the hit pool
   respectPct: number;
   saveAsHits: number;
   assistAsHits: number;
 }
 
 const DEFAULT: Config = {
-  model: "weighted",
   pool: 0,
   retalFixed: 900_000,
-  wScore: 3,
-  wHit: 1,
-  wSave: 4,
-  wAssist: 2,
   respectPct: 75,
   saveAsHits: 1,
   assistAsHits: 1,
@@ -95,12 +83,11 @@ export function WarPayoutPanel() {
     setConfig((c) => ({ ...c, [k]: v === "" ? 0 : Number(v) }));
 
   // Each member's total = chain-hour pay + retal pay (fixed each) + a share of
-  // what's left of the prize. Both models use the SAME mechanism: each stat is
-  // its own "category pool" — normalised WITHIN the category, then the weights
-  // decide what fraction of the leftover each category commands (score weight 3
-  // + hit 1 + save 4 + assist 2 → score gets 3/10 of the pool, etc.). Empty
-  // categories are dropped so nothing is lost. Largest-remainder keeps the
-  // integer shares summing exactly to what was actually distributed.
+  // what's left of the prize. A respect pool (respectPct%) is shared by respect
+  // and a hit pool (the rest) by war hits, with saves/assists as fictional hits.
+  // Each pool is normalised within itself; empty pools are dropped so nothing is
+  // lost. Largest-remainder keeps the integer shares summing exactly to what was
+  // actually distributed.
   const { rows, sumChain, sumRetal, distributed, prize } = useMemo(() => {
     const prize = Math.max(0, Math.round(config.pool));
     const retalFixed = Math.max(0, config.retalFixed);
@@ -121,26 +108,19 @@ export function WarPayoutPanel() {
     const sumRetal = base.reduce((s, r) => s + r.retalPay, 0);
     const distributable = Math.max(0, prize - sumChain - sumRetal);
 
-    // categories: [weight, per-member values]. Split model folds saves/assists
-    // into the hit category as fictional hits, per the admin's version.
+    // Two category pools of the leftover: a respect pool (respectPct%) shared by
+    // respect, and a hit pool (the rest) shared by war hits — with saves and
+    // assists folded in as fictional hits.
     const pct = Math.min(100, Math.max(0, config.respectPct));
-    const categories: { w: number; vals: number[] }[] =
-      config.model === "weighted"
-        ? [
-            { w: config.wScore, vals: base.map((r) => r.respect) },
-            { w: config.wHit, vals: base.map((r) => r.war_hits) },
-            { w: config.wSave, vals: base.map((r) => r.saves) },
-            { w: config.wAssist, vals: base.map((r) => r.assists) },
-          ]
-        : [
-            { w: pct, vals: base.map((r) => r.respect) },
-            {
-              w: 100 - pct,
-              vals: base.map(
-                (r) => r.war_hits + config.saveAsHits * r.saves + config.assistAsHits * r.assists,
-              ),
-            },
-          ];
+    const categories: { w: number; vals: number[] }[] = [
+      { w: pct, vals: base.map((r) => r.respect) },
+      {
+        w: 100 - pct,
+        vals: base.map(
+          (r) => r.war_hits + config.saveAsHits * r.saves + config.assistAsHits * r.assists,
+        ),
+      },
+    ];
 
     // only categories with a positive weight AND something to divide take a cut
     const active = categories
@@ -244,7 +224,7 @@ export function WarPayoutPanel() {
         <h2 className="font-bold">War payout calculator</h2>
         <p className="mt-1 text-xs text-neutral-500">
           Total earnings per member = their chain-hour pay + retal pay (a fixed amount per retal) +
-          a share of what&apos;s left of the prize pool. Pick how the leftover is split below.
+          a share of what&apos;s left of the prize pool (respect pool + hit pool).
         </p>
 
         <div className="mt-4 flex flex-wrap items-end gap-4">
@@ -278,52 +258,18 @@ export function WarPayoutPanel() {
       </section>
 
       <section className="rounded-xl border border-neutral-800 bg-neutral-900 p-5">
-        <div className="flex flex-wrap items-center gap-2">
-          <h3 className="font-bold">Split model</h3>
-          <div className="ml-2 flex rounded-md border border-neutral-700 p-0.5 text-sm">
-            {(
-              [
-                ["weighted", "Weighted pool"],
-                ["split", "Respect 75 / Hit 25"],
-              ] as [Model, string][]
-            ).map(([m, label]) => (
-              <button
-                key={m}
-                onClick={() => setConfig((c) => ({ ...c, model: m }))}
-                className={`rounded px-3 py-1 font-medium transition ${
-                  config.model === m
-                    ? "bg-emerald-700 text-white"
-                    : "text-neutral-400 hover:text-neutral-200"
-                }`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <p className="mt-2 text-xs text-neutral-500">
-          {config.model === "weighted"
-            ? "Four category pools. The weights below set each category's share of the leftover (e.g. 3/1/4/2 → score gets 3/10, hits 1/10, saves 4/10, assists 2/10). Each category is shared out within itself, so raw sizes don't matter — respect never drowns out hits."
-            : "Two category pools of the leftover: a respect pool (shared by respect) and a hit pool (shared by war hits, with saves and assists counted as extra hits)."}
+        <h3 className="font-bold">Payout weights</h3>
+        <p className="mt-1 text-xs text-neutral-500">
+          The leftover is split into a respect pool (shared by respect) and a hit pool (shared by
+          war hits). Saves and assists count as fictional hits in the hit pool — set how many hits
+          each is worth.
         </p>
 
         <div className="mt-3 grid grid-cols-2 gap-4 sm:grid-cols-4">
           {numInput("Retal payment ($ each)", "retalFixed", 50_000, "fixed, paid off the top")}
-          {config.model === "weighted" ? (
-            <>
-              {numInput("Score (respect) weight", "wScore", 0.5)}
-              {numInput("Hit weight", "wHit", 0.5)}
-              {numInput("Save weight", "wSave", 0.5)}
-              {numInput("Assist weight", "wAssist", 0.5)}
-            </>
-          ) : (
-            <>
-              {numInput("Respect pool %", "respectPct", 5, "hit pool gets the rest")}
-              {numInput("Save = N hits", "saveAsHits", 0.5)}
-              {numInput("Assist = N hits", "assistAsHits", 0.5)}
-            </>
-          )}
+          {numInput("Respect pool %", "respectPct", 5, "hit pool gets the rest")}
+          {numInput("Save = N hits", "saveAsHits", 0.5)}
+          {numInput("Assist = N hits", "assistAsHits", 0.5)}
         </div>
 
         <div className="mt-4 flex flex-wrap items-center gap-3">

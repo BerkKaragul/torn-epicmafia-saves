@@ -3,18 +3,8 @@ import { db } from "@/lib/db";
 import { forbidden, sessionMember, unauthorized } from "@/lib/session";
 
 // non-negative numeric knobs; pool + retalFixed are whole dollars, the rest
-// are weights/ratios. Model picks how the leftover pool is split.
-const NUM_KEYS = [
-  "pool",
-  "retalFixed",
-  "wScore",
-  "wHit",
-  "wSave",
-  "wAssist",
-  "respectPct",
-  "saveAsHits",
-  "assistAsHits",
-] as const;
+// are ratios for the respect-pool / hit-pool split.
+const NUM_KEYS = ["pool", "retalFixed", "respectPct", "saveAsHits", "assistAsHits"] as const;
 
 // GET → { config, wars }  (+ report when ?war_id= is set)
 export async function GET(req: Request) {
@@ -65,9 +55,7 @@ export async function PATCH(req: Request) {
     return NextResponse.json({ error: "Bad request" }, { status: 400 });
   }
 
-  const config: Record<string, number | string> = {};
-
-  config.model = body.model === "split" ? "split" : "weighted";
+  const config: Record<string, number> = {};
 
   for (const k of NUM_KEYS) {
     const n = Number(body[k]);

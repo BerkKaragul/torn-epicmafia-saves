@@ -58,6 +58,8 @@ export function WarPayoutPanel() {
   const [savedConfig, setSavedConfig] = useState<Config>(DEFAULT);
   const [msg, setMsg] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [retalMsg, setRetalMsg] = useState<string | null>(null);
+  const [retalBusy, setRetalBusy] = useState(false);
 
   useEffect(() => {
     fetch("/api/admin/war-payout")
@@ -80,6 +82,32 @@ export function WarPayoutPanel() {
       setLoading(false);
     }
   }, []);
+
+  async function fetchRetals() {
+    if (!selected || selected === "all") return;
+    setRetalBusy(true);
+    setRetalMsg("Fetching faction attacks — this can take a minute…");
+    try {
+      const res = await fetch("/api/admin/war-retals", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ war_id: Number(selected) }),
+      });
+      const b = await res.json();
+      if (res.ok) {
+        setRetalMsg(
+          `Counted ${b.retals} retals across ${b.members} member(s) — scanned ${b.scanned} attacks over ${b.pages} page(s)${b.capped ? " (hit the page cap — rerun if a huge war)" : ""}.`,
+        );
+        await loadReport(selected);
+      } else {
+        setRetalMsg(b.error || "Failed.");
+      }
+    } catch {
+      setRetalMsg("Request failed.");
+    } finally {
+      setRetalBusy(false);
+    }
+  }
 
   useEffect(() => {
     if (selected) loadReport(selected);
@@ -264,7 +292,24 @@ export function WarPayoutPanel() {
               <option value="all">All time (every chain)</option>
             </select>
           </label>
+          <div className="flex flex-col text-sm">
+            <span className="text-neutral-400">Retals</span>
+            <button
+              onClick={fetchRetals}
+              disabled={retalBusy || !selected || selected === "all"}
+              title="Count every war retal (chain + non-chain) from faction attacks — needs faction API access on your key"
+              className="mt-1 rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 font-semibold text-neutral-200 hover:bg-neutral-800 disabled:opacity-40"
+            >
+              {retalBusy ? "Fetching…" : "↻ Fetch war retals"}
+            </button>
+          </div>
         </div>
+        {retalMsg && <p className="mt-2 text-xs text-amber-300">{retalMsg}</p>}
+        <p className="mt-1 text-xs text-neutral-600">
+          Retals shown here come from the chain reports until you fetch — that misses hits landed
+          outside a chain. Fetching pulls the full count from faction attacks (needs faction API
+          access on your key).
+        </p>
       </section>
 
       <section className="rounded-xl border border-neutral-800 bg-neutral-900 p-5">

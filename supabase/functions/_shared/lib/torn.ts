@@ -241,6 +241,22 @@ export function makeTornClient(opts: TornClientOptions) {
         ...(params.limit !== undefined ? { limit: params.limit } : {}),
         ...(params.sort !== undefined ? { sort: params.sort } : {}),
       }).then((r) => r.attacks),
+    // faction-wide attacks — needs a Limited key whose owner has faction API
+    // access. One page; caller paginates via the `to` cursor.
+    factionAttacks: (params: {
+      from?: number;
+      to?: number;
+      limit?: number;
+      sort?: "ASC" | "DESC";
+      filters?: string;
+    }) =>
+      call<{ attacks: TornAttack[] }>("/faction/attacks", {
+        ...(params.from !== undefined ? { from: params.from } : {}),
+        ...(params.to !== undefined ? { to: params.to } : {}),
+        ...(params.limit !== undefined ? { limit: params.limit } : {}),
+        ...(params.sort !== undefined ? { sort: params.sort } : {}),
+        ...(params.filters !== undefined ? { filters: params.filters } : {}),
+      }).then((r) => r.attacks),
   };
 }
 

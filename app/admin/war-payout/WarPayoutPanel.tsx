@@ -15,6 +15,7 @@ interface ReportRow {
   name: string;
   respect: number;
   war_hits: number;
+  outside_hits: number;
   retaliations: number;
   assists: number;
   saves: number;
@@ -34,6 +35,10 @@ interface Config {
   assistAsHits: number;
   saveScore: number;
   assistScore: number;
+  // outside hits are normally NOT paid; when the admin opts in they count as
+  // fictional hits in the hit pool
+  includeOutside: boolean;
+  outsideAsHits: number;
 }
 
 const DEFAULT: Config = {
@@ -44,6 +49,8 @@ const DEFAULT: Config = {
   assistAsHits: 1,
   saveScore: 1,
   assistScore: 1,
+  includeOutside: false,
+  outsideAsHits: 1,
 };
 
 const fmtDate = (iso: string) =>
@@ -96,7 +103,7 @@ export function WarPayoutPanel() {
       const b = await res.json();
       if (res.ok) {
         setRetalMsg(
-          `Counted ${b.retals} retals across ${b.members} member(s) — scanned ${b.scanned} attacks over ${b.pages} page(s)${b.capped ? " (hit the page cap — rerun if a huge war)" : ""}.`,
+          `Counted ${b.retals} retals + ${b.assists} assists across ${b.members} member(s) — scanned ${b.scanned} attacks over ${b.pages} page(s)${b.capped ? " (hit the page cap — rerun if a huge war)" : ""}.`,
         );
         await loadReport(selected);
       } else {
@@ -122,7 +129,7 @@ export function WarPayoutPanel() {
   // Each pool is normalised within itself; empty pools are dropped so nothing is
   // lost. Largest-remainder keeps the integer shares summing exactly to what was
   // actually distributed.
-  const { rows, sumChain, sumRetal, distributed, prize } = useMemo(() => {
+  const { rows, sumChain, sumRetal, distributed, prize, respectPerUnit, hitPerUnit } = useMemo(() => {
     const prize = Math.max(0, Math.round(config.pool));
     const retalFixed = Math.max(0, config.retalFixed);
 
@@ -131,6 +138,7 @@ export function WarPayoutPanel() {
       name: r.name,
       respect: Number(r.respect),
       war_hits: Number(r.war_hits),
+      outside_hits: Number(r.outside_hits),
       retaliations: Number(r.retaliations),
       assists: Number(r.assists),
       saves: Number(r.saves),
@@ -146,18 +154,21 @@ export function WarPayoutPanel() {
     // pool (the rest). Saves and assists draw from BOTH — each is a fictional war
     // hit: it counts as N hits in the hit pool, and carries a fictional respect
     // score (N × the respect an average war hit earned) in the respect pool.
+    // Outside hits are only in the hit pool, and only when the admin opts in.
     const pct = Math.min(100, Math.max(0, config.respectPct));
     const totalRespect = base.reduce((s, r) => s + r.respect, 0);
     const totalHits = base.reduce((s, r) => s + r.war_hits, 0);
     const respectPerHit = totalHits > 0 ? totalRespect / totalHits : 0;
     // hit factor → hit pool; score factor → respect pool (in avg-hit respect)
     const ficHits = (r: (typeof base)[number]) =>
-      config.saveAsHits * r.saves + config.assistAsHits * r.assists;
+      config.saveAsHits * r.saves +
+      config.assistAsHits * r.assists +
+      (config.includeOutside ? config.outsideAsHits * r.outside_hits : 0);
     const ficRespect = (r: (typeof base)[number]) =>
       respectPerHit * (config.saveScore * r.saves + config.assistScore * r.assists);
-    const categories: { w: number; vals: number[] }[] = [
-      { w: pct, vals: base.map((r) => r.respect + ficRespect(r)) },
-      { w: 100 - pct, vals: base.map((r) => r.war_hits + ficHits(r)) },
+    const categories: { key: string; w: number; vals: number[] }[] = [
+      { key: "respect", w: pct, vals: base.map((r) => r.respect + ficRespect(r)) },
+      { key: "hit", w: 100 - pct, vals: base.map((r) => r.war_hits + ficHits(r)) },
     ];
 
     // only categories with a positive weight AND something to divide take a cut
@@ -167,9 +178,14 @@ export function WarPayoutPanel() {
     const wTotal = active.reduce((s, c) => s + c.w, 0);
 
     const shares = base.map(() => 0);
+    let respectPerUnit = 0;
+    let hitPerUnit = 0;
     if (wTotal > 0) {
       for (const c of active) {
         const catPool = (c.w / wTotal) * distributable;
+        const perUnit = c.total > 0 ? catPool / c.total : 0;
+        if (c.key === "respect") respectPerUnit = perUnit;
+        if (c.key === "hit") hitPerUnit = perUnit;
         base.forEach((_, i) => {
           shares[i] += (c.vals[i] / c.total) * catPool;
         });
@@ -192,7 +208,7 @@ export function WarPayoutPanel() {
       .sort((a, b) => b.total - a.total);
 
     const distributed = shareInt.reduce((a, b) => a + b, 0);
-    return { rows, sumChain, sumRetal, distributed, prize };
+    return { rows, sumChain, sumRetal, distributed, prize, respectPerUnit, hitPerUnit };
   }, [report, config]);
 
   const overspent = prize > 0 && sumChain + sumRetal > prize;
@@ -330,6 +346,21 @@ export function WarPayoutPanel() {
           <div />
           {numInput("Assist → hits", "assistAsHits", 0.5, "in the hit pool")}
           {numInput("Assist → score", "assistScore", 0.5, "avg-hit respect, in the respect pool")}
+          <label className="text-sm">
+            <span className="flex items-center gap-2 text-neutral-400">
+              <input
+                type="checkbox"
+                checked={config.includeOutside}
+                onChange={(e) =>
+                  setConfig((c) => ({ ...c, includeOutside: e.target.checked }))
+                }
+              />
+              Pay outside hits
+            </span>
+            <span className="mt-0.5 block text-xs text-neutral-600">off by default; rare</span>
+          </label>
+          {config.includeOutside &&
+            numInput("Outside → hits", "outsideAsHits", 0.5, "in the hit pool")}
         </div>
 
         <div className="mt-4 flex flex-wrap items-center gap-3">
@@ -354,6 +385,11 @@ export function WarPayoutPanel() {
             across {rows.length} member(s) · chain {fmtMoney(sumChain)} + retals{" "}
             {fmtMoney(sumRetal)} + split {fmtMoney(distributed)}
           </span>
+          {(respectPerUnit > 0 || hitPerUnit > 0) && (
+            <span className="text-sm text-sky-300">
+              ≈ {fmtMoney(Math.round(respectPerUnit))}/score · {fmtMoney(Math.round(hitPerUnit))}/hit
+            </span>
+          )}
           <button
             onClick={exportCsv}
             disabled={rows.length === 0}
@@ -384,6 +420,7 @@ export function WarPayoutPanel() {
                   <th className="py-1.5 pr-3">Member</th>
                   <th className="py-1.5 pr-3">Respect</th>
                   <th className="py-1.5 pr-3">Hits</th>
+                  {config.includeOutside && <th className="py-1.5 pr-3">Outside</th>}
                   <th className="py-1.5 pr-3">Retals</th>
                   <th className="py-1.5 pr-3">Saves</th>
                   <th className="py-1.5 pr-3">Assists</th>
@@ -399,6 +436,11 @@ export function WarPayoutPanel() {
                     <td className="py-2 pr-3 font-medium">{r.name}</td>
                     <td className="py-2 pr-3 tabular-nums text-neutral-400">{fmtNum(r.respect)}</td>
                     <td className="py-2 pr-3 tabular-nums text-neutral-400">{r.war_hits}</td>
+                    {config.includeOutside && (
+                      <td className="py-2 pr-3 tabular-nums text-neutral-400">
+                        {r.outside_hits || "—"}
+                      </td>
+                    )}
                     <td className="py-2 pr-3 tabular-nums text-sky-300">{r.retaliations || "—"}</td>
                     <td className="py-2 pr-3 tabular-nums text-emerald-400">{r.saves || "—"}</td>
                     <td className="py-2 pr-3 tabular-nums text-neutral-400">{r.assists || "—"}</td>

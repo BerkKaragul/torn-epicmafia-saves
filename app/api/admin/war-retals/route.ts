@@ -14,7 +14,7 @@ const DELAY_MS = 700; // keep us under 100 requests/min on the caller's key
 // A qualifying war retal (same rule as the community userscript): a ranked-war
 // hospitalization on the enemy war faction that carried both a war and a
 // retaliation bonus.
-function qualifies(a: TornAttack, ourFaction: number, opponent: number): boolean {
+function isWarRetal(a: TornAttack, ourFaction: number, opponent: number): boolean {
   return (
     a.is_ranked_war === true &&
     a.result === "Hospitalized" &&
@@ -22,6 +22,17 @@ function qualifies(a: TornAttack, ourFaction: number, opponent: number): boolean
     a.defender?.faction?.id === opponent &&
     Number(a.modifiers?.war) > 1 &&
     Number(a.modifiers?.retaliation) > 1
+  );
+}
+
+// a ranked-war assist on the enemy war faction (chain reports miss non-chain
+// assists, so we count them here for the full total)
+function isWarAssist(a: TornAttack, ourFaction: number, opponent: number): boolean {
+  return (
+    a.is_ranked_war === true &&
+    a.result === "Assist" &&
+    a.attacker?.faction?.id === ourFaction &&
+    a.defender?.faction?.id === opponent
   );
 }
 
@@ -77,7 +88,7 @@ export async function POST(req: Request) {
   }
   const torn = tornClient(key);
 
-  const tally = new Map<number, { retals: number; respect: number }>();
+  const tally = new Map<number, { retals: number; assists: number; respect: number }>();
   const seen = new Set<number>();
   let cursor = toS;
   let pages = 0;
@@ -105,10 +116,16 @@ export async function POST(req: Request) {
         scanned += 1;
         const ts = Number(a.ended || a.started || 0);
         if (ts && ts < oldest) oldest = ts;
-        if (qualifies(a, ourFaction, opponent) && a.attacker) {
-          const t = tally.get(a.attacker.id) ?? { retals: 0, respect: 0 };
-          t.retals += 1;
-          t.respect += Number(a.respect_gain || 0);
+        if (!a.attacker) continue;
+        const retal = isWarRetal(a, ourFaction, opponent);
+        const assist = isWarAssist(a, ourFaction, opponent);
+        if (retal || assist) {
+          const t = tally.get(a.attacker.id) ?? { retals: 0, assists: 0, respect: 0 };
+          if (retal) {
+            t.retals += 1;
+            t.respect += Number(a.respect_gain || 0);
+          }
+          if (assist) t.assists += 1;
           tally.set(a.attacker.id, t);
         }
       }
@@ -141,12 +158,13 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Fetch failed — try again." }, { status: 500 });
   }
 
-  // replace this war's stored retals with the fresh tally
+  // replace this war's stored counts with the fresh tally
   await db().from("war_retals").delete().eq("torn_war_id", warId);
   const rows = [...tally.entries()].map(([member_id, t]) => ({
     torn_war_id: warId,
     member_id,
     retals: t.retals,
+    assists: t.assists,
     respect: Math.round(t.respect),
   }));
   if (rows.length) {
@@ -156,11 +174,14 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Counted, but saving failed." }, { status: 500 });
     }
   }
+  // mark the war so these faction-attacks counts become authoritative
+  await db().from("wars").update({ retals_synced: true }).eq("torn_war_id", warId);
 
   return NextResponse.json({
     ok: true,
     members: rows.length,
     retals: rows.reduce((s, r) => s + r.retals, 0),
+    assists: rows.reduce((s, r) => s + r.assists, 0),
     scanned,
     pages,
     capped,

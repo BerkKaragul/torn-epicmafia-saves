@@ -12,6 +12,7 @@ const NUM_KEYS = [
   "assistAsHits",
   "saveScore",
   "assistScore",
+  "outsideAsHits",
 ] as const;
 
 // GET → { config, wars }  (+ report when ?war_id= is set)
@@ -63,7 +64,7 @@ export async function PATCH(req: Request) {
     return NextResponse.json({ error: "Bad request" }, { status: 400 });
   }
 
-  const config: Record<string, number> = {};
+  const config: Record<string, number | boolean> = {};
 
   for (const k of NUM_KEYS) {
     const n = Number(body[k]);
@@ -73,6 +74,7 @@ export async function PATCH(req: Request) {
     // pool and the fixed retal amount are whole dollars; the rest keep decimals
     config[k] = k === "pool" || k === "retalFixed" ? Math.round(n) : n;
   }
+  config.includeOutside = Boolean(body.includeOutside);
 
   const { error } = await db()
     .from("settings")

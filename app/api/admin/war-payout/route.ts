@@ -33,6 +33,10 @@ export async function GET(req: Request) {
   ]);
 
   let report = null;
+  // chains overlapping this war whose report isn't in yet (still running, or
+  // just ended and not synced). While one exists, milestone-bonus respect isn't
+  // stripped, so respect — and the split — can be inflated.
+  let pendingChains = 0;
   if (warParam) {
     const { data, error } = await db().rpc("war_report", {
       p_war: warParam === "all" ? null : Number(warParam),
@@ -42,12 +46,27 @@ export async function GET(req: Request) {
       return NextResponse.json({ error: "Could not build the report" }, { status: 500 });
     }
     report = data ?? [];
+
+    if (warParam !== "all") {
+      const war = (wars ?? []).find((w) => String(w.torn_war_id) === warParam);
+      if (war) {
+        const warEnd = war.ended_at ?? new Date().toISOString();
+        const { count } = await db()
+          .from("chains")
+          .select("torn_chain_id", { count: "exact", head: true })
+          .eq("report_synced", false)
+          .lt("started_at", warEnd)
+          .or(`ended_at.is.null,ended_at.gt.${war.started_at}`);
+        pendingChains = count ?? 0;
+      }
+    }
   }
 
   return NextResponse.json({
     config: settings?.war_payout_config ?? {},
     wars: wars ?? [],
     report,
+    pending_chains: pendingChains,
   });
 }
 

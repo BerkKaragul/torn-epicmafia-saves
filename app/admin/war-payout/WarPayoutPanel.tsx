@@ -67,6 +67,7 @@ export function WarPayoutPanel() {
   const [loading, setLoading] = useState(false);
   const [retalMsg, setRetalMsg] = useState<string | null>(null);
   const [retalBusy, setRetalBusy] = useState(false);
+  const [pendingChains, setPendingChains] = useState(0);
 
   useEffect(() => {
     fetch("/api/admin/war-payout")
@@ -85,6 +86,7 @@ export function WarPayoutPanel() {
     try {
       const b = await fetch(`/api/admin/war-payout?war_id=${warId}`).then((r) => r.json());
       setReport(b.report ?? []);
+      setPendingChains(b.pending_chains ?? 0);
     } finally {
       setLoading(false);
     }
@@ -398,6 +400,15 @@ export function WarPayoutPanel() {
             ⬇ CSV
           </button>
         </div>
+
+        {pendingChains > 0 && (
+          <p className="mt-2 rounded-md border border-amber-700 bg-amber-950/40 px-3 py-2 text-sm text-amber-300">
+            ⚠ {pendingChains} chain{pendingChains > 1 ? "s" : ""} from this war {pendingChains > 1 ? "haven't" : "hasn't"}{" "}
+            finished/synced yet. Milestone-bonus respect (50th/100th/…/2500th hits) can only be
+            stripped once a chain ends and Torn publishes its report — so respect, and the split, may
+            be inflated right now. Wait for the chain to finish, then it corrects automatically.
+          </p>
+        )}
 
         {overspent && (
           <p className="mt-2 text-sm text-red-400">

@@ -1,0 +1,1267 @@
+// ==UserScript==
+// @name         ChainWatch Saver Widget (Custom + MP3)
+// @namespace    torn.chainwatch.custom.mp3
+// @version      3.1.1
+// @description  Custom fork of EPIC Mafia's ChainWatch widget with per-alert custom-URL sound support. Fetches MP3/WAV/OGG via GM_xmlhttpRequest, decodes via Web Audio API, caches decoded AudioBuffers, plays with per-alert volume. Falls back to built-in synth siren if the URL fetch fails.
+// @author       EPIC Mafia (original v1.5.0) / ButtChew [3840391] (mods)
+// @license      MIT
+// @match        https://www.torn.com/*
+// @match        https://torn.com/*
+// @grant        GM_xmlhttpRequest
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_registerMenuCommand
+// @connect      torn-epicmafia-saves.vercel.app
+// @connect      *
+// @run-at       document-idle
+// ==/UserScript==
+ 
+/*
+  Fork of chain-watch-widget-custom.user.js (v2.0.2) — adds custom-URL sound
+  support so each alert can play a hosted MP3/WAV/OGG instead of (or alongside)
+  the built-in synth chimes/siren.
+ 
+  Custom-URL behavior:
+    - Sound picker per alert has a new "Custom URL" option; select it and
+      supply a URL in the adjacent input.
+    - On script load AND on settings-save, all configured URLs are pre-fetched
+      via GM_xmlhttpRequest (bypasses page CSP + CORS), decoded via
+      AudioContext.decodeAudioData(), and the resulting AudioBuffers cached
+      in memory. Alerts then play instantly with no per-fire network latency.
+    - If a URL is unreachable or the file is not a supported audio format,
+      the alert falls back to the built-in warning siren so you still get
+      an audible signal.
+    - `@connect *` grants Tampermonkey permission to fetch from any host.
+      Narrow this to your specific hosting domain(s) if you prefer tighter
+      permissions (e.g. `@connect torn-sounds.pages.dev`).
+ 
+  Recommended hosting for the URLs:
+    - Cloudflare Pages: push a repo with MP3s in `/public/`, get
+      https://<project>.pages.dev/<file>.mp3 — free, HTTPS, global CDN.
+    - Cloudflare R2 with public bucket + custom domain — good if you have
+      many files and want a real storage backend.
+    - Railway: overkill for static files unless you already have a service.
+ 
+  Everything else is inherited from the v2.0.2 fork.
+*/
+ 
+(function () {
+  "use strict";
+ 
+  const SITE = "https://torn-epicmafia-saves.vercel.app";
+  const POLL_MS = 12000;
+  const SETTINGS_KEY = "cw_custom_settings_v1";
+ 
+  // Default sound library — served from ButtChew's Cloudflare Worker. Users can
+  // still override this URL in the settings modal ("Sound library" section)
+  // to point at their own manifest; leaving the field blank falls back to this.
+  const DEFAULT_LIBRARY_MANIFEST_URL = "https://chain-saver-sounds.buttchew.workers.dev/manifest.json";
+ 
+  // Debug logging — toggled via Tampermonkey menu (avoids userscript-sandbox
+  // gotchas where `CW_DEBUG = true` in DevTools console doesn't reach the
+  // userscript context). Persisted so it survives page reloads.
+  let CW_DEBUG_ENABLED = GM_getValue("cw_debug", false);
+  const dlog = (...args) => { if (CW_DEBUG_ENABLED) console.log("[ChainWatch]", ...args); };
+ 
+  // ============================================================
+  // ===== SETTINGS =============================================
+  // ============================================================
+  const SOUND_OPTIONS = [
+    { id: "none", label: "None (silent)" },
+    { id: "chimeA", label: "Chime A (soft bell)" },
+    { id: "chimeB", label: "Chime B (rising ping)" },
+    { id: "siren", label: "Siren (warning intensity)" },
+    { id: "sirenCritical", label: "Siren (critical intensity)" },
+    { id: "library", label: "From library (pick a hosted MP3)" },
+    { id: "url", label: "Custom URL (paste any URL)" },
+  ];
+ 
+  const DEFAULTS = {
+    alerts: [
+      {
+        id: "warn1", label: "Warning 1 (1:30)", seconds: 90, enabled: true,
+        onDuty:  { sound: "chimeA", soundUrl: "", libraryFile: "", volume: 0.5, loop: false },
+        offDuty: { sound: "none",   soundUrl: "", libraryFile: "", volume: 0.5, loop: false },
+      },
+      {
+        id: "warn2", label: "Warning 2 (1:00)", seconds: 60, enabled: true,
+        onDuty:  { sound: "chimeB", soundUrl: "", libraryFile: "", volume: 0.5, loop: false },
+        offDuty: { sound: "none",   soundUrl: "", libraryFile: "", volume: 0.5, loop: false },
+      },
+      {
+        id: "critical", label: "Critical (0:30)", seconds: 30, enabled: true,
+        onDuty:  { sound: "sirenCritical", soundUrl: "", libraryFile: "", volume: 0.7, loop: true  },
+        offDuty: { sound: "chimeB",        soundUrl: "", libraryFile: "", volume: 0.5, loop: false },
+      },
+    ],
+    playerNameOverride: "",
+    vibration: true,
+    libraryManifestUrl: DEFAULT_LIBRARY_MANIFEST_URL,
+  };
+ 
+  function loadSettings() {
+    try {
+      const raw = GM_getValue(SETTINGS_KEY, null);
+      if (!raw) return JSON.parse(JSON.stringify(DEFAULTS));
+      const s = typeof raw === "string" ? JSON.parse(raw) : raw;
+      // Merge shallowly so new fields inherit defaults
+      return {
+        alerts: Array.isArray(s.alerts) && s.alerts.length ? s.alerts : DEFAULTS.alerts,
+        playerNameOverride: s.playerNameOverride ?? "",
+        vibration: s.vibration ?? true,
+        // OR (not ??) so an empty string from an older-version save also falls back to the default
+        libraryManifestUrl: s.libraryManifestUrl || DEFAULT_LIBRARY_MANIFEST_URL,
+      };
+    } catch (e) {
+      console.warn("[ChainWatch Custom] settings load failed", e);
+      return JSON.parse(JSON.stringify(DEFAULTS));
+    }
+  }
+ 
+  function saveSettings(s) {
+    try { GM_setValue(SETTINGS_KEY, s); } catch (e) { console.warn("[ChainWatch Custom] settings save failed", e); }
+  }
+ 
+  // ============================================================
+  // ===== PLAYER NAME / ROTATION ===============================
+  // ============================================================
+  function detectMyName() {
+    try {
+      for (let i = 0; i < sessionStorage.length; i++) {
+        const key = sessionStorage.key(i);
+        if (key && key.startsWith("sidebarData") && !key.includes("undefined")) {
+          const data = JSON.parse(sessionStorage.getItem(key));
+          const n = data && data.user && data.user.name;
+          if (n) return String(n);
+        }
+      }
+    } catch {}
+    return null;
+  }
+ 
+  function getMyName() {
+    const override = (loadSettings().playerNameOverride || "").trim();
+    if (override) return override;
+    return detectMyName();
+  }
+ 
+  function isMyTurn(data) {
+    if (!data || !data.turn) return false;
+    const myName = getMyName();
+    if (!myName) return false;
+    return String(data.turn).trim().toLowerCase() === myName.trim().toLowerCase();
+  }
+ 
+  // ============================================================
+  // ===== AUDIO ================================================
+  // ============================================================
+  let audioCtx = null;
+  function audio() {
+    try {
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === "suspended") audioCtx.resume();
+      return audioCtx;
+    } catch (e) { return null; }
+  }
+ 
+  // Silent tick — call from a user gesture to unlock the AudioContext
+  function armAudio() {
+    const c = audio();
+    if (!c) return false;
+    const osc = c.createOscillator();
+    const g = c.createGain();
+    g.gain.value = 0.0001;
+    osc.connect(g).connect(c.destination);
+    osc.start();
+    osc.stop(c.currentTime + 0.01);
+    return true;
+  }
+ 
+  // Chime A — soft warm single note + subtle 5th, ~500ms decay
+  function playChimeA(vol) {
+    const c = audio(); if (!c) return;
+    vol = Math.max(0, Math.min(1, vol));
+    const t0 = c.currentTime;
+    const dur = 0.5;
+ 
+    const build = (freq, level) => {
+      const g = c.createGain();
+      g.gain.setValueAtTime(0, t0);
+      g.gain.linearRampToValueAtTime(vol * level, t0 + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
+      const o = c.createOscillator();
+      o.type = "sine";
+      o.frequency.value = freq;
+      o.connect(g).connect(c.destination);
+      o.start(t0);
+      o.stop(t0 + dur);
+    };
+    build(440, 1.0);   // A4
+    build(660, 0.35);  // E5 (subtle 5th)
+  }
+ 
+  // Chime B — two rising triangle-wave pings, brighter and more clipped than A
+  function playChimeB(vol) {
+    const c = audio(); if (!c) return;
+    vol = Math.max(0, Math.min(1, vol));
+    const noteDur = 0.14;
+    const gap = 0.06;
+    const t0 = c.currentTime;
+ 
+    const note = (freq, startAt) => {
+      const g = c.createGain();
+      g.gain.setValueAtTime(0, startAt);
+      g.gain.linearRampToValueAtTime(vol, startAt + 0.015);
+      g.gain.exponentialRampToValueAtTime(0.001, startAt + noteDur);
+      const o = c.createOscillator();
+      o.type = "triangle";
+      o.frequency.value = freq;
+      o.connect(g).connect(c.destination);
+      o.start(startAt);
+      o.stop(startAt + noteDur);
+    };
+    note(700, t0);
+    note(1050, t0 + noteDur + gap);
+  }
+ 
+  // Air-raid siren — from the original, refactored to accept a volume argument
+  function playSiren(critical, vol) {
+    const c = audio(); if (!c) return;
+    vol = vol == null ? (critical ? 0.6 : 0.42) : Math.max(0, Math.min(1, vol));
+    const t0 = c.currentTime;
+    const dur = critical ? 1.5 : 1.1;
+    const sweeps = critical ? 3 : 2;
+    const lowHz = critical ? 620 : 440;
+    const highHz = critical ? 1750 : 1150;
+ 
+    const master = c.createGain();
+    master.gain.setValueAtTime(0, t0);
+    master.gain.linearRampToValueAtTime(vol, t0 + 0.02);
+    master.gain.setValueAtTime(vol, t0 + dur - 0.08);
+    master.gain.linearRampToValueAtTime(0, t0 + dur);
+ 
+    const tremolo = c.createGain();
+    tremolo.gain.value = 1;
+    const lfo = c.createOscillator();
+    const lfoDepth = c.createGain();
+    lfo.type = "square";
+    lfo.frequency.value = critical ? 14 : 9;
+    lfoDepth.gain.value = 0.5;
+    lfo.connect(lfoDepth).connect(tremolo.gain);
+ 
+    const shaper = c.createWaveShaper();
+    const curve = new Float32Array(257);
+    for (let i = 0; i < 257; i++) {
+      const x = (i / 256) * 2 - 1;
+      curve[i] = Math.tanh(x * 3);
+    }
+    shaper.curve = curve;
+ 
+    tremolo.connect(shaper).connect(master).connect(c.destination);
+ 
+    const voice = (type, detune, level) => {
+      const osc = c.createOscillator();
+      const g = c.createGain();
+      osc.type = type;
+      osc.detune.value = detune;
+      g.gain.value = level;
+      const step = dur / (sweeps * 2);
+      osc.frequency.setValueAtTime(lowHz, t0);
+      for (let i = 0; i < sweeps; i++) {
+        const base = t0 + i * step * 2;
+        osc.frequency.linearRampToValueAtTime(highHz, base + step);
+        osc.frequency.linearRampToValueAtTime(lowHz, base + step * 2);
+      }
+      osc.connect(g).connect(tremolo);
+      osc.start(t0);
+      osc.stop(t0 + dur);
+    };
+    voice("sawtooth", 0, 0.5);
+    voice("square", 30, 0.28);
+    if (critical) voice("sawtooth", -1200, 0.22);
+ 
+    lfo.start(t0);
+    lfo.stop(t0 + dur);
+  }
+ 
+  function maybeVibrate(pattern) {
+    if (!loadSettings().vibration) return;
+    try { if (navigator.vibrate) navigator.vibrate(pattern); } catch {}
+  }
+ 
+  // ============================================================
+  // ===== CUSTOM-URL AUDIO CACHE ===============================
+  // ============================================================
+  // Fetch → decode → cache → play. Fetch goes through GM_xmlhttpRequest so we
+  // bypass Torn's page CSP + any CORS friction. Once decoded, the AudioBuffer
+  // sits in memory keyed by URL; subsequent plays are instant.
+  const _mp3Cache = new Map();     // url -> AudioBuffer
+  const _mp3Inflight = new Map();  // url -> Promise<AudioBuffer>
+  const _mp3Failed = new Map();    // url -> { at, error } (for surfacing in diagnostics)
+ 
+  function fetchAndDecode(url) {
+    if (!url) return Promise.reject(new Error("no url"));
+    if (_mp3Cache.has(url)) return Promise.resolve(_mp3Cache.get(url));
+    if (_mp3Inflight.has(url)) return _mp3Inflight.get(url);
+ 
+    const promise = new Promise((resolve, reject) => {
+      dlog("MP3 fetch start", url);
+      GM_xmlhttpRequest({
+        method: "GET",
+        url,
+        responseType: "arraybuffer",
+        timeout: 15000,
+        onload: (r) => {
+          if (r.status < 200 || r.status >= 300) {
+            reject(new Error("HTTP " + r.status));
+            return;
+          }
+          const ctx = audio();
+          if (!ctx) { reject(new Error("AudioContext unavailable")); return; }
+          // decodeAudioData works on suspended contexts — no user-gesture needed
+          ctx.decodeAudioData(
+            r.response,
+            (buf) => {
+              _mp3Cache.set(url, buf);
+              _mp3Failed.delete(url);
+              dlog("MP3 decoded + cached", url, buf.duration.toFixed(2) + "s");
+              resolve(buf);
+            },
+            (err) => reject(new Error("decode failed: " + (err && err.message ? err.message : err)))
+          );
+        },
+        onerror: (err) => reject(new Error("network error: " + JSON.stringify(err))),
+        ontimeout: () => reject(new Error("timeout")),
+      });
+    });
+ 
+    _mp3Inflight.set(url, promise);
+    promise.then(
+      () => _mp3Inflight.delete(url),
+      (err) => {
+        _mp3Inflight.delete(url);
+        _mp3Failed.set(url, { at: Date.now(), error: String(err) });
+        console.warn("[ChainWatch] MP3 fetch/decode failed", url, err);
+      }
+    );
+    return promise;
+  }
+ 
+  function playBuffer(buf, vol) {
+    const c = audio(); if (!c || !buf) return;
+    vol = Math.max(0, Math.min(1, vol));
+    const src = c.createBufferSource();
+    const g = c.createGain();
+    g.gain.value = vol;
+    src.buffer = buf;
+    src.connect(g).connect(c.destination);
+    src.start();
+  }
+ 
+  // Play a URL sound. If already cached: plays instantly. If not cached:
+  // triggers a fetch and, once done, plays. To avoid mid-alert silence when
+  // the cache misses, we also fire the fallback siren immediately.
+  function playUrl(url, vol) {
+    if (!url) return;
+    if (_mp3Cache.has(url)) {
+      playBuffer(_mp3Cache.get(url), vol);
+      return;
+    }
+    // Fallback fires now so the user isn't silent while we fetch
+    console.warn("[ChainWatch] URL not cached, playing fallback siren while fetching", url);
+    playSiren(false, vol);
+    fetchAndDecode(url).catch(() => { /* already logged */ });
+  }
+ 
+  // Called on script init AND after settings save — pulls every configured URL
+  // into the cache in parallel so alerts fire without network latency.
+  function prewarmMp3Cache() {
+    const urls = new Set();
+    const s = loadSettings();
+    for (const a of s.alerts) {
+      for (const mode of [a.onDuty, a.offDuty]) {
+        const url = resolveModeUrl(mode);
+        if (url) urls.add(url);
+      }
+    }
+    for (const url of urls) {
+      if (_mp3Cache.has(url) || _mp3Inflight.has(url)) continue;
+      fetchAndDecode(url).catch(() => { /* logged in fetch */ });
+    }
+  }
+ 
+  // ============================================================
+  // ===== SOUND LIBRARY (MANIFEST) =============================
+  // ============================================================
+  // A JSON manifest at a user-configured URL lists available sounds by
+  // display name + file URL (relative or absolute). Widget fetches it once
+  // per session; settings modal populates a dropdown from it so the user
+  // doesn't have to memorize filenames.
+  //
+  // Accepted manifest formats:
+  //   { "sounds": [{ "name": "Ding 01", "url": "ding-01.mp3" }] }
+  //   [{ "name": "...", "url": "..." }]
+  //   ["ding-01.mp3", "warning.mp3"]   (name derived from filename)
+  let _library = null;              // [{ name, url }, ...] resolved absolute
+  let _libraryInflight = null;
+  let _libraryError = null;
+ 
+  function normalizeManifest(raw, manifestUrl) {
+    let entries;
+    if (Array.isArray(raw)) entries = raw;
+    else if (raw && Array.isArray(raw.sounds)) entries = raw.sounds;
+    else return [];
+ 
+    return entries.map((e) => {
+      let name, url;
+      if (typeof e === "string") { name = e; url = e; }
+      else if (e && typeof e === "object" && e.url) {
+        name = e.name || String(e.url).split("/").pop();
+        url = e.url;
+      } else return null;
+      try { url = new URL(url, manifestUrl).href; } catch { return null; }
+      return { name, url };
+    }).filter(Boolean);
+  }
+ 
+  function fetchLibrary(force) {
+    const manifestUrl = loadSettings().libraryManifestUrl;
+    if (!manifestUrl) {
+      _library = null;
+      _libraryError = null;
+      return Promise.resolve(null);
+    }
+    if (_library && !force) return Promise.resolve(_library);
+    if (_libraryInflight && !force) return _libraryInflight;
+ 
+    _libraryInflight = new Promise((resolve) => {
+      dlog("library fetch start", manifestUrl);
+      GM_xmlhttpRequest({
+        method: "GET",
+        url: manifestUrl,
+        timeout: 10000,
+        onload: (r) => {
+          try {
+            if (r.status < 200 || r.status >= 300) throw new Error("HTTP " + r.status);
+            const raw = JSON.parse(r.responseText);
+            _library = normalizeManifest(raw, manifestUrl);
+            _libraryError = null;
+            dlog("library loaded", _library.length + " entries");
+          } catch (err) {
+            _libraryError = String(err);
+            _library = null;
+            console.warn("[ChainWatch] library manifest parse failed", err);
+          }
+          resolve(_library);
+        },
+        onerror: (err) => {
+          _libraryError = "network error";
+          _library = null;
+          console.warn("[ChainWatch] library manifest fetch failed", err);
+          resolve(null);
+        },
+        ontimeout: () => {
+          _libraryError = "timeout";
+          _library = null;
+          resolve(null);
+        },
+      });
+    });
+ 
+    _libraryInflight.finally(() => { _libraryInflight = null; });
+    return _libraryInflight;
+  }
+ 
+  // Resolve a mode object to an absolute URL for its configured sound source,
+  // or null if the mode is silent / built-in / not yet resolvable.
+  function resolveModeUrl(mode) {
+    if (!mode) return null;
+    if (mode.sound === "url") return (mode.soundUrl || "").trim() || null;
+    if (mode.sound === "library") {
+      const file = (mode.libraryFile || "").trim();
+      if (!file) return null;
+      const manifest = loadSettings().libraryManifestUrl;
+      if (!manifest) return null;
+      // libraryFile is stored as the ABSOLUTE URL (populated from the
+      // manifest at pick time) so we don't need to re-resolve here.
+      return file;
+    }
+    return null;
+  }
+ 
+  // Sound dispatch. mode is the alert's onDuty or offDuty object:
+  //   { sound, soundUrl?, volume, loop? }
+  // opts.bypassMaster=true allows local test-plays even if this tab isn't
+  // the cross-tab audio master (used by settings modal previews).
+  function playSound(mode, opts) {
+    opts = opts || {};
+    if (!opts.bypassMaster && !isAudioMaster()) {
+      dlog("playSound blocked by isAudioMaster()=false", mode);
+      return;
+    }
+    dlog("playSound dispatch", { sound: mode.sound, volume: mode.volume, bypassMaster: !!opts.bypassMaster });
+    const vol = mode.volume;
+    try {
+      switch (mode.sound) {
+        case "chimeA": playChimeA(vol); break;
+        case "chimeB": playChimeB(vol); break;
+        case "siren":  playSiren(false, vol); maybeVibrate([220, 120, 220]); break;
+        case "sirenCritical": playSiren(true, vol); maybeVibrate([300, 90, 300, 90, 600]); break;
+        case "url":     playUrl(mode.soundUrl, vol); break;
+        case "library": playUrl(resolveModeUrl(mode), vol); break;
+        case "none":
+        default: break;
+      }
+    } catch (err) {
+      console.error("[ChainWatch] sound dispatch threw", mode, err);
+    }
+  }
+ 
+  // ============================================================
+  // ===== CROSS-TAB AUDIO MASTER (from original) ===============
+  // ============================================================
+  let sirenOn = GM_getValue("cw_siren", false);
+  const TAB_ID = Date.now() + "-" + Math.random();
+  const peers = {};
+  let bc = null;
+  try { if (window.BroadcastChannel) bc = new BroadcastChannel("cw_siren_audio"); } catch (e) {}
+ 
+  const myVis = () => (document.hidden ? 1 : 0);
+  function olderThan(a, b) {
+    const na = parseInt(a, 10);
+    const nb = parseInt(b, 10);
+    return na !== nb ? na < nb : a < b;
+  }
+  function isAudioMaster() {
+    if (!sirenOn) return false;
+    if (!bc) return true;
+    const now = Date.now();
+    const myV = myVis();
+    for (const id in peers) {
+      const p = peers[id];
+      if (now - p.t > 3000) { delete peers[id]; continue; }
+      if (p.vis < myV) return false;
+      if (p.vis === myV && olderThan(id, TAB_ID)) return false;
+    }
+    return true;
+  }
+  function announce(type) {
+    if (bc) bc.postMessage({ type: type, id: TAB_ID, vis: myVis() });
+  }
+  if (bc) {
+    bc.onmessage = function (e) {
+      const m = e.data || {};
+      if (m.type === "beat" && m.id) peers[m.id] = { t: Date.now(), vis: m.vis || 0 };
+      else if (m.type === "bye" && m.id) delete peers[m.id];
+    };
+    setInterval(() => announce("beat"), 1000);
+    document.addEventListener("visibilitychange", () => announce("beat"));
+    window.addEventListener("pagehide", () => announce("bye"));
+  }
+ 
+  // ============================================================
+  // ===== ALERT ENGINE =========================================
+  // ============================================================
+  // Per-chain dedup — remembers which alerts have already fired this chain
+  // so single-shot chimes don't re-fire every render tick.
+  const _firedForChain = { chainId: null, fired: new Set() };
+  let _activeLoop = null; // { alertId, timerId }
+  let _tickCounter = 0;
+ 
+  function stopActiveLoop() {
+    if (_activeLoop && _activeLoop.timerId) clearInterval(_activeLoop.timerId);
+    _activeLoop = null;
+  }
+ 
+  // On chain change (or first observation): pre-mark any already-crossed
+  // thresholds as fired so opening a mid-chain tab doesn't retro-alarm.
+  function resetFiredIfChainChanged(chainId, remaining, settings) {
+    if (chainId === _firedForChain.chainId) return;
+    _firedForChain.chainId = chainId;
+    _firedForChain.fired.clear();
+    if (remaining == null) return;
+    for (const a of settings.alerts) {
+      if (!a.enabled) continue;
+      if (remaining <= a.seconds) {
+        _firedForChain.fired.add(a.id + ":on");
+        _firedForChain.fired.add(a.id + ":off");
+      }
+    }
+  }
+ 
+  function updateAlerts(data, live, remaining) {
+    // Heartbeat — proves updateAlerts is being called each tick (behind debug flag,
+    // so it's silent in normal operation). Sampled every 5 ticks to avoid spam.
+    if (CW_DEBUG_ENABLED) {
+      _tickCounter = (_tickCounter + 1) % 5;
+      if (_tickCounter === 0) {
+        dlog("tick", { sirenOn, live, remaining, chainId: data?.chain?.id ?? null });
+      }
+    }
+    if (!sirenOn || !live) { stopActiveLoop(); return; }
+ 
+    const chainId = (data && data.chain && data.chain.id) || null;
+    const settings = loadSettings();
+    resetFiredIfChainChanged(chainId, remaining, settings);
+ 
+    const myTurn = isMyTurn(data);
+ 
+    // Find the deepest loop-mode alert that's currently applicable
+    let bestLoop = null;
+ 
+    for (const a of settings.alerts) {
+      if (!a.enabled) continue;
+      if (remaining > a.seconds) continue;
+      const mode = myTurn ? a.onDuty : a.offDuty;
+      if (!mode || !mode.sound || mode.sound === "none") continue;
+ 
+      if (mode.loop) {
+        if (!bestLoop || a.seconds < bestLoop.alert.seconds) {
+          bestLoop = { alert: a, mode };
+        }
+      } else {
+        const firedKey = a.id + (myTurn ? ":on" : ":off");
+        if (_firedForChain.fired.has(firedKey)) continue;
+        _firedForChain.fired.add(firedKey);
+        playSound(mode);
+      }
+    }
+ 
+    if (bestLoop) {
+      const cadence = bestLoop.mode.sound === "sirenCritical" ? 1700 : 2600;
+      if (_activeLoop && _activeLoop.alertId === bestLoop.alert.id) {
+        dlog("loop already running", { alertId: _activeLoop.alertId, remaining });
+        return;
+      }
+      stopActiveLoop();
+      const doFire = () => playSound(bestLoop.mode);
+      dlog("loop starting", { alertId: bestLoop.alert.id, sound: bestLoop.mode.sound, cadence, remaining, myTurn });
+      doFire();
+      _activeLoop = {
+        alertId: bestLoop.alert.id,
+        timerId: setInterval(doFire, cadence),
+      };
+    } else {
+      if (_activeLoop) dlog("loop stopping (no bestLoop this tick)", { was: _activeLoop.alertId, remaining });
+      stopActiveLoop();
+    }
+  }
+ 
+  // ============================================================
+  // ===== WIDGET UI ============================================
+  // ============================================================
+  const box = document.createElement("div");
+  const pos = GM_getValue("cw_pos", { top: 120, left: 8 });
+  Object.assign(box.style, {
+    position: "fixed",
+    top: pos.top + "px",
+    left: pos.left + "px",
+    zIndex: 99999,
+    width: "180px",
+    padding: "8px 10px",
+    background: "#0a0a0a",
+    border: "1px solid #10b981",
+    borderRadius: "10px",
+    color: "#e5e5e5",
+    font: "12px/1.35 system-ui, sans-serif",
+    boxShadow: "0 4px 14px rgba(0,0,0,.5)",
+    cursor: "grab",
+    userSelect: "none",
+    touchAction: "none",
+  });
+ 
+  // Header (persistent — only #cw-body is rewritten each render)
+  box.innerHTML =
+    '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">' +
+      '<b style="color:#34d399;font-size:11px;flex:1">🔗 ChainWatch</b>' +
+      '<span id="cw-settings" data-cw-nodrag="1" title="Settings" ' +
+        'style="cursor:pointer;font-size:14px;line-height:1;opacity:.85">⚙</span>' +
+      '<span id="cw-siren" data-cw-nodrag="1" ' +
+        'style="cursor:pointer;font-size:15px;line-height:1" ' +
+        'title="Arm alerts">' + (sirenOn ? "🔊" : "🔇") + "</span>" +
+    "</div>" +
+    '<div id="cw-body">ChainWatch…</div>';
+  document.body.appendChild(box);
+ 
+  const sirenBtn = box.querySelector("#cw-siren");
+  const settingsBtn = box.querySelector("#cw-settings");
+  sirenBtn.title = sirenOn ? "Alerts armed — tap to mute" : "Arm alerts";
+ 
+  sirenBtn.addEventListener("click", function (e) {
+    e.stopPropagation();
+    sirenOn = !sirenOn;
+    GM_setValue("cw_siren", sirenOn);
+    sirenBtn.textContent = sirenOn ? "🔊" : "🔇";
+    sirenBtn.title = sirenOn ? "Alerts armed — tap to mute" : "Arm alerts";
+    if (sirenOn) {
+      armAudio();
+      // Play a soft confirmation chime rather than the loud siren
+      playSound({ sound: "chimeA", volume: 0.4 }, { bypassMaster: true });
+      announce("beat");
+    } else {
+      stopActiveLoop();
+      announce("bye");
+    }
+  });
+ 
+  settingsBtn.addEventListener("click", function (e) {
+    e.stopPropagation();
+    openSettingsModal();
+  });
+ 
+  // Also expose via Tampermonkey menu
+  try { GM_registerMenuCommand("ChainWatch Widget Settings", openSettingsModal); } catch {}
+ 
+  // Debug controls — Tampermonkey menu (works across sandbox boundaries where
+  // setting window.CW_DEBUG from DevTools console doesn't reach the userscript).
+  try {
+    GM_registerMenuCommand("ChainWatch: Toggle Debug Log", () => {
+      CW_DEBUG_ENABLED = !CW_DEBUG_ENABLED;
+      GM_setValue("cw_debug", CW_DEBUG_ENABLED);
+      console.log("[ChainWatch] Debug logging:", CW_DEBUG_ENABLED ? "ON" : "OFF");
+    });
+    GM_registerMenuCommand("ChainWatch: Dump Diagnostics", () => {
+      const diag = {
+        version: "3.1.1",
+        sirenOn,
+        isAudioMaster: isAudioMaster(),
+        peers: Object.entries(peers).map(([id, p]) => ({ id, ...p, isMe: id === TAB_ID })),
+        tabId: TAB_ID,
+        tabVisible: !document.hidden,
+        detectedName: detectMyName(),
+        effectiveName: getMyName(),
+        activeLoop: _activeLoop ? { alertId: _activeLoop.alertId } : null,
+        firedForChain: {
+          chainId: _firedForChain.chainId,
+          fired: [..._firedForChain.fired],
+        },
+        mp3Cache: {
+          cached: [..._mp3Cache.entries()].map(([url, buf]) => ({ url, duration: +buf.duration.toFixed(2) })),
+          inflight: [..._mp3Inflight.keys()],
+          failed: [..._mp3Failed.entries()].map(([url, info]) => ({ url, ...info })),
+        },
+        library: {
+          loaded: _library ? _library.length : 0,
+          entries: _library || [],
+          error: _libraryError,
+        },
+        latestData: data,
+        settings: loadSettings(),
+        debugEnabled: CW_DEBUG_ENABLED,
+      };
+      console.log("[ChainWatch DIAG]", diag);
+    });
+  } catch {}
+ 
+  function clamp() {
+    const maxL = Math.max(0, window.innerWidth - box.offsetWidth);
+    const maxT = Math.max(0, window.innerHeight - box.offsetHeight);
+    box.style.left = Math.min(box.offsetLeft, maxL) + "px";
+    box.style.top = Math.min(box.offsetTop, maxT) + "px";
+  }
+  clamp();
+  window.addEventListener("resize", clamp);
+ 
+  // Drag — PointerEvent primary, mouse/touch fallback (unchanged from original)
+  let drag = null;
+  function noDrag(target) {
+    return target.tagName === "A" || (target.closest && target.closest("[data-cw-nodrag]"));
+  }
+  function moveTo(px, py) {
+    const maxL = Math.max(0, window.innerWidth - box.offsetWidth);
+    const maxT = Math.max(0, window.innerHeight - box.offsetHeight);
+    box.style.left = Math.min(Math.max(0, px - drag.x), maxL) + "px";
+    box.style.top = Math.min(Math.max(0, py - drag.y), maxT) + "px";
+  }
+  function persist() {
+    drag = null;
+    box.style.cursor = "grab";
+    GM_setValue("cw_pos", { top: box.offsetTop, left: box.offsetLeft });
+  }
+  if (window.PointerEvent) {
+    box.addEventListener("pointerdown", function (e) {
+      if (noDrag(e.target)) return;
+      drag = { x: e.clientX - box.offsetLeft, y: e.clientY - box.offsetTop, id: e.pointerId };
+      try { box.setPointerCapture(e.pointerId); } catch (_) {}
+      box.style.cursor = "grabbing";
+      e.preventDefault();
+    });
+    box.addEventListener("pointermove", function (e) {
+      if (!drag || e.pointerId !== drag.id) return;
+      moveTo(e.clientX, e.clientY);
+      e.preventDefault();
+    });
+    const up = function () {
+      if (!drag) return;
+      try { box.releasePointerCapture(drag.id); } catch (_) {}
+      persist();
+    };
+    box.addEventListener("pointerup", up);
+    box.addEventListener("pointercancel", up);
+  } else {
+    const pt = (e) => (e.touches && e.touches[0] ? e.touches[0] : e);
+    const start = function (e) {
+      if (noDrag(e.target)) return;
+      const p = pt(e);
+      drag = { x: p.x - box.offsetLeft, y: p.y - box.offsetTop };
+      box.style.cursor = "grabbing";
+    };
+    const move = function (e) {
+      if (!drag) return;
+      const p = pt(e);
+      moveTo(p.x, p.y);
+      if (e.cancelable) e.preventDefault();
+    };
+    box.addEventListener("mousedown", start);
+    box.addEventListener("touchstart", start, { passive: true });
+    window.addEventListener("mousemove", move);
+    window.addEventListener("touchmove", move, { passive: false });
+    window.addEventListener("mouseup", persist);
+    window.addEventListener("touchend", persist);
+    window.addEventListener("touchcancel", persist);
+  }
+ 
+  // ============================================================
+  // ===== RENDER + POLL ========================================
+  // ============================================================
+  let data = null;
+ 
+  function fmt(sec) {
+    sec = Math.max(0, Math.floor(sec));
+    return Math.floor(sec / 60) + ":" + String(sec % 60).padStart(2, "0");
+  }
+ 
+  // Escape text for safe interpolation into innerHTML (defensive against
+  // hostile/compromised API responses — the original had raw interpolation).
+  function esc(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+ 
+  function render() {
+    const body = document.getElementById("cw-body");
+    if (!body) return;
+    const link = SITE + "/duty";
+ 
+    if (!data || !data.chain) {
+      body.textContent = "ChainWatch…";
+      updateAlerts(null, false, null);
+      return;
+    }
+ 
+    const c = data.chain;
+    const live = c.id > 0 && c.current > 0 && c.cooldown_s === 0;
+    const elapsed = c.observed_at ? Math.floor(Date.now() / 1000) - c.observed_at : 0;
+    const remaining = live ? Math.max(0, c.timeout_s - elapsed) : 0;
+ 
+    // Border-glow thresholds — tied to the strictest configured alert seconds
+    const settings = loadSettings();
+    const critAlert = settings.alerts.find(a => a.id === "critical");
+    const warnAlert = settings.alerts.find(a => a.id === "warn1");
+    const critT = critAlert ? critAlert.seconds : 30;
+    const warnT = warnAlert ? warnAlert.seconds : 90;
+    const critical = live && remaining <= critT;
+    const danger = live && remaining <= warnT;
+    const timerColor = critical ? "#f87171" : danger ? "#fbbf24" : "#34d399";
+ 
+    if (danger) {
+      box.style.borderColor = critical ? "#ef4444" : "#f59e0b";
+      box.style.boxShadow = "0 0 14px " + (critical ? "rgba(239,68,68,.7)" : "rgba(245,158,11,.55)");
+    } else {
+      box.style.borderColor = "#10b981";
+      box.style.boxShadow = "0 4px 14px rgba(0,0,0,.5)";
+    }
+ 
+    // Fire alert logic on every tick
+    updateAlerts(data, live, remaining);
+ 
+    const myTurn = isMyTurn(data);
+ 
+    let html = "";
+    if (live) {
+      html +=
+        '<div style="font-weight:800;font-size:20px;color:' + timerColor +
+        ';font-variant-numeric:tabular-nums">' + fmt(remaining) + "</div>" +
+        '<div style="color:#a3a3a3;font-size:11px;margin-bottom:4px">chain ' +
+        c.current.toLocaleString() + (c.max ? " / " + c.max.toLocaleString() : "") + "</div>";
+    } else {
+      html +=
+        '<div style="color:#a3a3a3;margin-bottom:4px">' +
+        (c.cooldown_s > 0 ? "chain on cooldown" : "no chain") + "</div>";
+    }
+ 
+    if (!data.saving_enabled) {
+      html += '<div style="color:#a3a3a3">Saving is off</div>';
+    } else if (data.on_duty > 0) {
+      const turnLabel = myTurn
+        ? '<span style="color:#fbbf24;font-weight:700">🎯 YOUR TURN</span>'
+        : '<span style="color:#34d399;font-weight:700">🛡 ' + esc(data.turn || "?") + "</span>";
+      html += "<div>" + turnLabel + "</div>";
+      if (data.next) html += '<div style="color:#a3a3a3">next: ' + esc(data.next) + "</div>";
+      html +=
+        '<div style="color:#737373;font-size:10px;margin-top:2px">' +
+        esc(data.on_duty) + " on duty</div>";
+    } else {
+      html +=
+        '<div style="color:#f87171;font-weight:800">🚨 NO SAVERS!</div>' +
+        '<a href="' + esc(link) + '" target="_blank" ' +
+        'style="color:#34d399;font-weight:700;text-decoration:underline">Go apply →</a>';
+    }
+    body.innerHTML = html;
+  }
+ 
+  function poll() {
+    GM_xmlhttpRequest({
+      method: "GET",
+      url: SITE + "/api/widget?t=" + Date.now(),
+      timeout: 10000,
+      onload: function (r) {
+        try {
+          const j = JSON.parse(r.responseText);
+          if (j && !j.error) data = j;
+        } catch (e) {}
+        render();
+      },
+      onerror: function () {},
+    });
+  }
+ 
+  poll();
+  setInterval(poll, POLL_MS);
+  setInterval(render, 1000);
+ 
+  // Fetch the sound library manifest (if configured) then pre-warm all
+  // configured URL sounds so first alert firing is instant
+  fetchLibrary().finally(() => prewarmMp3Cache());
+ 
+  // ============================================================
+  // ===== SETTINGS MODAL =======================================
+  // ============================================================
+  function openSettingsModal() {
+    // Remove existing modal if present
+    const existing = document.getElementById("cw-settings-modal");
+    if (existing) existing.remove();
+ 
+    const settings = loadSettings();
+    const detectedName = detectMyName();
+ 
+    const modal = document.createElement("div");
+    modal.id = "cw-settings-modal";
+    Object.assign(modal.style, {
+      position: "fixed",
+      inset: "0",
+      background: "rgba(0,0,0,.6)",
+      zIndex: 100000,
+      display: "flex",
+      alignItems: "flex-start",
+      justifyContent: "center",
+      padding: "40px 12px 12px",
+      overflow: "auto",
+      font: "13px/1.4 system-ui, sans-serif",
+      color: "#e5e5e5",
+    });
+ 
+    const panel = document.createElement("div");
+    Object.assign(panel.style, {
+      background: "#111",
+      border: "1px solid #333",
+      borderRadius: "10px",
+      padding: "18px 20px",
+      width: "min(560px, 100%)",
+      boxShadow: "0 8px 32px rgba(0,0,0,.7)",
+    });
+    modal.appendChild(panel);
+ 
+    const soundOptsHtml = SOUND_OPTIONS.map(o => `<option value="${o.id}">${o.label}</option>`).join("");
+ 
+    const librarySelectHtml = (currentFile) => {
+      if (!_library) {
+        const msg = _libraryError
+          ? `(library failed to load: ${esc(_libraryError)})`
+          : (loadSettings().libraryManifestUrl ? "(library loading…)" : "(no library configured)");
+        return `<option value="">${msg}</option>`;
+      }
+      if (!_library.length) return `<option value="">(library is empty)</option>`;
+      let html = `<option value="">-- pick a sound --</option>`;
+      for (const s of _library) {
+        const selected = s.url === currentFile ? " selected" : "";
+        html += `<option value="${esc(s.url)}"${selected}>${esc(s.name)}</option>`;
+      }
+      return html;
+    };
+ 
+    const modeBlock = (idx, side, mode) => {
+      const soundField   = `alerts.${idx}.${side}.sound`;
+      const urlField     = `alerts.${idx}.${side}.soundUrl`;
+      const libraryField = `alerts.${idx}.${side}.libraryFile`;
+      const volField     = `alerts.${idx}.${side}.volume`;
+      const loopField    = `alerts.${idx}.${side}.loop`;
+      const label = side === "onDuty" ? "On duty:" : "Off duty:";
+      return `
+        <div style="display:grid;grid-template-columns:110px 1fr 60px auto;gap:6px;align-items:center;margin-bottom:4px">
+          <span style="color:#a3a3a3">${label}</span>
+          <select data-cw-field="${soundField}" style="background:#1a1a1a;border:1px solid #333;color:#e5e5e5;padding:3px 6px;border-radius:4px">
+            ${soundOptsHtml}
+          </select>
+          <input type="range" min="0" max="1" step="0.05" value="${mode.volume}"
+            data-cw-field="${volField}" style="width:100%">
+          <label style="color:#a3a3a3;display:flex;align-items:center;gap:4px;font-size:11px">
+            <input type="checkbox" data-cw-field="${loopField}" ${mode.loop ? "checked" : ""}> loop
+          </label>
+        </div>
+        <div data-cw-library-row="${libraryField}" style="display:none;grid-template-columns:110px 1fr 60px;gap:6px;align-items:center;margin-bottom:6px;padding-left:110px">
+          <span></span>
+          <select data-cw-field="${libraryField}" style="background:#1a1a1a;border:1px solid #333;color:#e5e5e5;padding:3px 6px;border-radius:4px;font-size:11px">
+            ${librarySelectHtml(mode.libraryFile)}
+          </select>
+          <button type="button" data-cw-test-library="${libraryField}" style="background:#1a1a1a;border:1px solid #333;color:#e5e5e5;padding:3px 6px;border-radius:4px;cursor:pointer;font-size:11px">Test</button>
+        </div>
+        <div data-cw-url-row="${urlField}" style="display:none;grid-template-columns:110px 1fr 60px;gap:6px;align-items:center;margin-bottom:6px;padding-left:110px">
+          <span></span>
+          <input type="text" placeholder="https://…mp3" value="${esc(mode.soundUrl || "")}"
+            data-cw-field="${urlField}"
+            style="background:#1a1a1a;border:1px solid #333;color:#e5e5e5;padding:3px 6px;border-radius:4px;font-size:11px">
+          <button type="button" data-cw-test-url="${urlField}" style="background:#1a1a1a;border:1px solid #333;color:#e5e5e5;padding:3px 6px;border-radius:4px;cursor:pointer;font-size:11px">Test</button>
+        </div>
+      `;
+    };
+ 
+    const alertBlocks = settings.alerts.map((a, idx) => `
+      <div style="border:1px solid #333;border-radius:6px;padding:10px;margin-bottom:10px">
+        <label style="display:flex;align-items:center;gap:8px;font-weight:700;color:#34d399;margin-bottom:8px">
+          <input type="checkbox" data-cw-field="alerts.${idx}.enabled" ${a.enabled ? "checked" : ""}>
+          <span>${esc(a.label)}</span>
+        </label>
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
+          <span style="width:110px;color:#a3a3a3">Trigger at:</span>
+          <input type="number" min="1" max="600" step="1" value="${a.seconds}"
+            data-cw-field="alerts.${idx}.seconds"
+            style="width:70px;background:#1a1a1a;border:1px solid #333;color:#e5e5e5;padding:3px 6px;border-radius:4px">
+          <span style="color:#737373;font-size:11px">seconds (${fmt(a.seconds)})</span>
+        </div>
+        ${modeBlock(idx, "onDuty", a.onDuty)}
+        ${modeBlock(idx, "offDuty", a.offDuty)}
+      </div>
+    `).join("");
+ 
+    panel.innerHTML = `
+      <div style="display:flex;align-items:center;margin-bottom:12px">
+        <div style="flex:1;font-size:15px;font-weight:700;color:#34d399">🔗 ChainWatch Widget Settings</div>
+        <button data-cw-action="close" style="background:none;border:none;color:#a3a3a3;font-size:18px;cursor:pointer">✕</button>
+      </div>
+ 
+      <div style="text-transform:uppercase;font-size:11px;color:#737373;letter-spacing:1px;margin-bottom:6px">Alerts</div>
+      ${alertBlocks}
+ 
+      <div style="text-transform:uppercase;font-size:11px;color:#737373;letter-spacing:1px;margin:14px 0 6px">Rotation</div>
+      <div style="border:1px solid #333;border-radius:6px;padding:10px;margin-bottom:10px">
+        <div style="color:#a3a3a3;margin-bottom:6px">
+          Detected saver name: <span style="color:${detectedName ? "#34d399" : "#f87171"}">${detectedName ? esc(detectedName) : "(none — Torn sidebar not read yet)"}</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="width:110px;color:#a3a3a3">Override:</span>
+          <input type="text" value="${esc(settings.playerNameOverride)}" placeholder="(leave blank to auto-detect)"
+            data-cw-field="playerNameOverride"
+            style="flex:1;background:#1a1a1a;border:1px solid #333;color:#e5e5e5;padding:4px 8px;border-radius:4px">
+        </div>
+        <div style="color:#737373;font-size:11px;margin-top:6px">
+          When it's NOT your turn, alerts use the "Off duty" sound configured above.
+          Default: pre-warnings silenced, critical becomes a single chime instead of a siren loop.
+        </div>
+      </div>
+ 
+      <div style="text-transform:uppercase;font-size:11px;color:#737373;letter-spacing:1px;margin:14px 0 6px">Sound library</div>
+      <div style="border:1px solid #333;border-radius:6px;padding:10px;margin-bottom:10px">
+        <div style="color:#a3a3a3;margin-bottom:6px;font-size:11px">
+          Optional: paste a URL to a <code>manifest.json</code> hosted alongside your MP3s. The
+          widget populates a dropdown per alert so you don't have to memorize URLs. Manifest format:
+          <code>{ "sounds": [{ "name": "Ding", "url": "ding-01.mp3" }] }</code> — file URLs can be relative.
+        </div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="width:110px;color:#a3a3a3">Manifest URL:</span>
+          <input type="text" value="${esc(settings.libraryManifestUrl)}" placeholder="https://your-worker.example/manifest.json"
+            data-cw-field="libraryManifestUrl"
+            style="flex:1;background:#1a1a1a;border:1px solid #333;color:#e5e5e5;padding:4px 8px;border-radius:4px;font-size:11px">
+          <button type="button" data-cw-action="refresh-library" style="background:#1a1a1a;border:1px solid #333;color:#e5e5e5;padding:4px 10px;border-radius:4px;cursor:pointer;font-size:11px">Reload</button>
+        </div>
+        <div id="cw-library-status" style="color:#737373;font-size:11px;margin-top:6px">${
+          _library ? `Loaded ${_library.length} sound${_library.length === 1 ? "" : "s"} from library.`
+          : (_libraryError ? `<span style="color:#f87171">Library load failed: ${esc(_libraryError)}</span>`
+          : (settings.libraryManifestUrl ? "(loading…)" : "(no library configured — set a URL above)"))
+        }</div>
+      </div>
+ 
+      <div style="text-transform:uppercase;font-size:11px;color:#737373;letter-spacing:1px;margin:14px 0 6px">General</div>
+      <div style="border:1px solid #333;border-radius:6px;padding:10px;margin-bottom:10px">
+        <label style="display:flex;align-items:center;gap:8px;color:#a3a3a3">
+          <input type="checkbox" data-cw-field="vibration" ${settings.vibration ? "checked" : ""}>
+          <span>Vibration on siren (phones/tablets only)</span>
+        </label>
+      </div>
+ 
+      <div style="text-transform:uppercase;font-size:11px;color:#737373;letter-spacing:1px;margin:14px 0 6px">Test sounds</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px">
+        <button data-cw-test="chimeA" style="background:#1a1a1a;border:1px solid #333;color:#e5e5e5;padding:6px 10px;border-radius:4px;cursor:pointer">Chime A</button>
+        <button data-cw-test="chimeB" style="background:#1a1a1a;border:1px solid #333;color:#e5e5e5;padding:6px 10px;border-radius:4px;cursor:pointer">Chime B</button>
+        <button data-cw-test="siren" style="background:#1a1a1a;border:1px solid #333;color:#e5e5e5;padding:6px 10px;border-radius:4px;cursor:pointer">Siren (warning)</button>
+        <button data-cw-test="sirenCritical" style="background:#1a1a1a;border:1px solid #333;color:#e5e5e5;padding:6px 10px;border-radius:4px;cursor:pointer">Siren (critical)</button>
+      </div>
+ 
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button data-cw-action="reset" style="background:#1a1a1a;border:1px solid #333;color:#a3a3a3;padding:6px 14px;border-radius:4px;cursor:pointer">Reset defaults</button>
+        <button data-cw-action="cancel" style="background:#1a1a1a;border:1px solid #333;color:#e5e5e5;padding:6px 14px;border-radius:4px;cursor:pointer">Cancel</button>
+        <button data-cw-action="save" style="background:#10b981;border:none;color:#000;font-weight:700;padding:6px 14px;border-radius:4px;cursor:pointer">Save</button>
+      </div>
+    `;
+ 
+    // Populate <select> current values (innerHTML doesn't reflect programmatic .value on options built above)
+    panel.querySelectorAll("select[data-cw-field]").forEach(sel => {
+      const path = sel.getAttribute("data-cw-field").split(".");
+      let v = settings;
+      for (const p of path) v = v && v[p];
+      if (v != null) sel.value = v;
+    });
+ 
+    // Test buttons — always bypass master so previews work regardless of siren armed state
+    panel.querySelectorAll("[data-cw-test]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        armAudio();
+        playSound({ sound: btn.getAttribute("data-cw-test"), volume: 0.6 }, { bypassMaster: true });
+      });
+    });
+ 
+    // Shared helper: fetch → play a URL, with button feedback
+    const testUrl = async (btn, url) => {
+      if (!url) { btn.textContent = "no URL"; setTimeout(() => btn.textContent = "Test", 1500); return; }
+      armAudio();
+      const origText = btn.textContent;
+      btn.textContent = "loading…"; btn.disabled = true;
+      try {
+        const buf = await fetchAndDecode(url);
+        playBuffer(buf, 0.6);
+        btn.textContent = `ok (${buf.duration.toFixed(1)}s)`;
+      } catch (err) {
+        btn.textContent = "failed";
+        console.error("[ChainWatch] Test URL failed", url, err);
+      } finally {
+        setTimeout(() => { btn.textContent = origText; btn.disabled = false; }, 2500);
+      }
+    };
+ 
+    // Per-mode "Test URL" buttons — reads sibling URL input, fetches + plays
+    panel.querySelectorAll("[data-cw-test-url]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const target = btn.getAttribute("data-cw-test-url");
+        const input = panel.querySelector(`input[data-cw-field="${target}"]`);
+        testUrl(btn, input && input.value.trim());
+      });
+    });
+ 
+    // Per-mode "Test library" buttons — reads sibling library select, fetches + plays
+    panel.querySelectorAll("[data-cw-test-library]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const target = btn.getAttribute("data-cw-test-library");
+        const sel = panel.querySelector(`select[data-cw-field="${target}"]`);
+        testUrl(btn, sel && sel.value);
+      });
+    });
+ 
+    // Toggle URL / library row visibility as user changes the sound select
+    panel.querySelectorAll("select[data-cw-field]").forEach(sel => {
+      const field = sel.getAttribute("data-cw-field");
+      if (!/\.sound$/.test(field)) return;
+      const urlRow     = panel.querySelector(`[data-cw-url-row="${field.replace(/\.sound$/, ".soundUrl")}"]`);
+      const libraryRow = panel.querySelector(`[data-cw-library-row="${field.replace(/\.sound$/, ".libraryFile")}"]`);
+      const sync = () => {
+        if (urlRow)     urlRow.style.display     = sel.value === "url"     ? "grid" : "none";
+        if (libraryRow) libraryRow.style.display = sel.value === "library" ? "grid" : "none";
+      };
+      sync();
+      sel.addEventListener("change", sync);
+    });
+ 
+    // "Reload library" button — refetch manifest from the URL currently in the input
+    panel.querySelector('[data-cw-action="refresh-library"]').addEventListener("click", async () => {
+      const input = panel.querySelector('input[data-cw-field="libraryManifestUrl"]');
+      const url = input && input.value.trim();
+      const statusEl = panel.querySelector("#cw-library-status");
+      if (!url) { statusEl.textContent = "(enter a URL first)"; return; }
+      // Persist the URL immediately so fetchLibrary() reads the new value
+      const next = JSON.parse(JSON.stringify(settings));
+      next.libraryManifestUrl = url;
+      saveSettings(next);
+      _library = null; _libraryError = null; _libraryInflight = null;
+      statusEl.textContent = "(loading…)";
+      await fetchLibrary(true);
+      closeModal();
+      openSettingsModal(); // reopen with fresh library populated
+    });
+ 
+    // Kick off a library fetch on modal open if the URL is set but we haven't loaded yet
+    if (settings.libraryManifestUrl && !_library && !_libraryInflight) {
+      fetchLibrary().then(() => {
+        // If the modal is still open, patch the library selects and status line in place
+        if (!document.body.contains(modal)) return;
+        const statusEl = panel.querySelector("#cw-library-status");
+        if (statusEl) {
+          statusEl.innerHTML = _library
+            ? `Loaded ${_library.length} sound${_library.length === 1 ? "" : "s"} from library.`
+            : (_libraryError ? `<span style="color:#f87171">Library load failed: ${esc(_libraryError)}</span>` : "(no library)");
+        }
+        panel.querySelectorAll("select[data-cw-field]").forEach(sel => {
+          const field = sel.getAttribute("data-cw-field");
+          if (!/\.libraryFile$/.test(field)) return;
+          // Preserve current selection if it's still in the library
+          const currentValue = sel.value;
+          sel.innerHTML = librarySelectHtml(currentValue);
+          if (currentValue && [..._library || []].some(s => s.url === currentValue)) sel.value = currentValue;
+        });
+      });
+    }
+ 
+    // Close / Cancel / Reset / Save handlers
+    const closeModal = () => modal.remove();
+    panel.querySelector('[data-cw-action="close"]').addEventListener("click", closeModal);
+    panel.querySelector('[data-cw-action="cancel"]').addEventListener("click", closeModal);
+    panel.querySelector('[data-cw-action="reset"]').addEventListener("click", () => {
+      if (confirm("Reset all settings to defaults?")) {
+        saveSettings(JSON.parse(JSON.stringify(DEFAULTS)));
+        closeModal();
+        openSettingsModal();
+      }
+    });
+    panel.querySelector('[data-cw-action="save"]').addEventListener("click", () => {
+      const next = JSON.parse(JSON.stringify(settings));
+      panel.querySelectorAll("[data-cw-field]").forEach(el => {
+        const path = el.getAttribute("data-cw-field").split(".");
+        let value;
+        if (el.type === "checkbox") value = el.checked;
+        else if (el.type === "number" || el.type === "range") value = parseFloat(el.value);
+        else value = el.value;
+        // Walk the path, creating intermediate structure as needed
+        let obj = next;
+        for (let i = 0; i < path.length - 1; i++) {
+          const k = /^\d+$/.test(path[i]) ? parseInt(path[i], 10) : path[i];
+          obj = obj[k];
+        }
+        const lastK = path[path.length - 1];
+        obj[/^\d+$/.test(lastK) ? parseInt(lastK, 10) : lastK] = value;
+      });
+      saveSettings(next);
+      // Kick off pre-warm for any newly configured URLs so they're ready
+      prewarmMp3Cache();
+      closeModal();
+    });
+ 
+    // Click backdrop to close
+    modal.addEventListener("click", (e) => {
+      if (e.target === modal) closeModal();
+    });
+ 
+    document.body.appendChild(modal);
+  }
+})();

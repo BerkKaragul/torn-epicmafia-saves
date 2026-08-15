@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChainWatch Saver Widget
 // @namespace    chainwatch.epicmafia
-// @version      1.8.0
+// @version      1.9.0
 // @description  Shows the current & next chain saver (and timer) from ChainWatch, inside Torn — with the same danger siren as the site (one tab plays, not all).
 // @author       EPIC Mafia
 // @license      MIT
@@ -24,6 +24,10 @@
   // window so a landed save clears the siren within seconds (war = seconds).
   const POLL_CALM_MS = 7000;
   const POLL_DANGER_MS = 3000;
+  // Hide the whole widget for small/no chains — only chains worth saving (≥10)
+  // are shown. Doubles as the "get it off my screen when nothing's happening"
+  // ask, so no separate close button is needed.
+  const HIDE_BELOW_CHAIN = 10;
 
   // ── danger siren ─────────────────────────────────────────────────────────
   // A verbatim port of the website's alarm (lib/alarm.ts): a harsh sawtooth
@@ -438,7 +442,7 @@
   // compare against our own so we can nudge — or, in an emergency, stop — an
   // outdated install without anyone touching the server.
   const MY_VERSION =
-    (typeof GM_info !== "undefined" && GM_info.script && GM_info.script.version) || "1.8.0";
+    (typeof GM_info !== "undefined" && GM_info.script && GM_info.script.version) || "1.9.0";
   const INSTALL_URL = "https://greasyfork.org/en/scripts/589168-chainwatch-saver-widget";
   function cmpVersion(a, b) {
     const pa = String(a).split(".").map((n) => parseInt(n, 10) || 0);
@@ -461,8 +465,8 @@
     const link = SITE + "/duty";
 
     if (!data) {
-      body.textContent = "ChainWatch…";
       updateSiren(false, false, false);
+      box.style.display = "none";
       return;
     }
 
@@ -470,6 +474,7 @@
     const outdated = data.latest_version && cmpVersion(MY_VERSION, data.latest_version) < 0;
     if (data.min_version && cmpVersion(MY_VERSION, data.min_version) < 0) {
       updateSiren(false, false, false);
+      box.style.display = "";
       body.innerHTML =
         '<div style="color:#f87171;font-weight:700">⚠ Update required</div>' +
         '<a href="' +
@@ -479,6 +484,14 @@
     }
 
     const c = data.chain;
+    // only real chains (≥10) are worth showing — hide otherwise, sound off too
+    if (!c || c.current < HIDE_BELOW_CHAIN) {
+      updateSiren(false, false, false);
+      box.style.display = "none";
+      return;
+    }
+    box.style.display = "";
+
     const live = c.id > 0 && c.current > 0 && c.cooldown_s === 0;
     // extrapolate from when the poller last observed the timer (server clock)
     const elapsed = c.observed_at ? nowS() - c.observed_at : 0;
@@ -620,6 +633,7 @@
     }, currentPollMs());
   }
 
+  render(); // apply the hide-when-small rule immediately (no first-paint flash)
   poll();
   scheduleNextPoll();
   setInterval(render, 1000); // smooth countdown + siren check between polls

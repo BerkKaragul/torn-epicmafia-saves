@@ -4,7 +4,7 @@
 // reacts to the poller's realtime "poke", and extrapolates the countdown
 // between updates so it ticks smoothly.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { supabaseBrowser } from "@/lib/supabase-browser";
 import { fmtClock } from "@/lib/format";
 import type { StatePayload } from "@/lib/state";
@@ -12,12 +12,21 @@ import type { StatePayload } from "@/lib/state";
 export function ChainTimerBar() {
   const [state, setState] = useState<StatePayload | null>(null);
   const [nowS, setNowS] = useState(() => Math.floor(Date.now() / 1000));
+  // (server clock − this device's clock), from each response's Date header
+  const clockOffsetMs = useRef(0);
 
   useEffect(() => {
     const fetchState = async () => {
       try {
         const res = await fetch("/api/state");
-        if (res.ok) setState(await res.json());
+        if (res.ok) {
+          const d = res.headers.get("date");
+          if (d) {
+            const t = Date.parse(d);
+            if (!Number.isNaN(t)) clockOffsetMs.current = t - Date.now();
+          }
+          setState(await res.json());
+        }
       } catch {
         /* keep extrapolating */
       }
@@ -28,7 +37,10 @@ export function ChainTimerBar() {
       .on("broadcast", { event: "poke" }, fetchState)
       .subscribe();
     const poll = setInterval(fetchState, 30_000);
-    const tick = setInterval(() => setNowS(Math.floor(Date.now() / 1000)), 250);
+    const tick = setInterval(
+      () => setNowS(Math.floor((Date.now() + clockOffsetMs.current) / 1000)),
+      250,
+    );
     return () => {
       channel?.unsubscribe();
       clearInterval(poll);

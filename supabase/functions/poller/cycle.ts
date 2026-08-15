@@ -129,8 +129,11 @@ export async function runPollCycle(): Promise<void> {
       .eq("status", "pending"),
   ]);
   const busy = prevActive || (activeShiftCount ?? 0) > 0 || (pendingCount ?? 0) > 0;
+  // busy floor lowered 15s → 10s so a landed save is reflected sooner in war;
+  // requires the pg_cron job to fire at 10s too (migration 0028) and
+  // settings.poll_interval_s <= 10. Idle stays relaxed to spare the API budget.
   const interval = busy
-    ? Math.max(15, settings.poll_interval_s)
+    ? Math.max(10, settings.poll_interval_s)
     : Math.max(15, settings.idle_poll_interval_s);
   const sinceLast = prevObs ? nowS - prevObs.polledAt : Infinity;
   if (sinceLast < interval - 3) return; // -3 absorbs cron jitter

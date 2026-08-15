@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChainWatch Saver Widget
 // @namespace    chainwatch.epicmafia
-// @version      1.5.0
+// @version      1.6.0
 // @description  Shows the current & next chain saver (and timer) from ChainWatch, inside Torn — with the same danger siren as the site (one tab plays, not all).
 // @author       EPIC Mafia
 // @license      MIT
@@ -19,7 +19,10 @@
   // No setup needed — it just works. Data is faction-scoped and read-only
   // (saver names + chain timer only).
   const SITE = "https://torn-epicmafia-saves.vercel.app";
-  const POLL_MS = 12000;
+  // Adaptive cadence: relaxed while the chain is healthy, tight in the danger
+  // window so a landed save clears the siren within seconds (war = seconds).
+  const POLL_CALM_MS = 7000;
+  const POLL_DANGER_MS = 3000;
 
   // ── danger siren ─────────────────────────────────────────────────────────
   // A verbatim port of the website's alarm (lib/alarm.ts): a harsh sawtooth
@@ -337,6 +340,54 @@
   // ── state + rendering ────────────────────────────────────────────────────
   let data = null;
 
+  // Align the countdown to the SERVER clock, not this device's (which may be
+  // minutes off). Refreshed from each response's Date header, so every member
+  // — and the website — extrapolate from the same reference.
+  let clockOffsetMs = 0;
+  const nowMs = () => Date.now() + clockOffsetMs;
+  const nowS = () => Math.floor(nowMs() / 1000);
+
+  function syncClock(rawHeaders) {
+    try {
+      if (!rawHeaders) return;
+      let dateMs = null;
+      let age = 0;
+      rawHeaders.split(/\r?\n/).forEach(function (line) {
+        const i = line.indexOf(":");
+        if (i < 0) return;
+        const k = line.slice(0, i).trim().toLowerCase();
+        const v = line.slice(i + 1).trim();
+        if (k === "date") {
+          const t = Date.parse(v);
+          if (!isNaN(t)) dateMs = t;
+        } else if (k === "age") {
+          const a = parseInt(v, 10);
+          if (!isNaN(a)) age = a;
+        }
+      });
+      if (dateMs !== null) clockOffsetMs = dateMs + age * 1000 - Date.now();
+    } catch (e) {
+      /* leave the offset as-is */
+    }
+  }
+
+  // ── self-update signalling ─────────────────────────────────────────────────
+  // The server advertises the latest (and minimum-allowed) widget version; we
+  // compare against our own so we can nudge — or, in an emergency, stop — an
+  // outdated install without anyone touching the server.
+  const MY_VERSION =
+    (typeof GM_info !== "undefined" && GM_info.script && GM_info.script.version) || "1.6.0";
+  const INSTALL_URL = "https://greasyfork.org/en/scripts/589168-chainwatch-saver-widget";
+  function cmpVersion(a, b) {
+    const pa = String(a).split(".").map((n) => parseInt(n, 10) || 0);
+    const pb = String(b).split(".").map((n) => parseInt(n, 10) || 0);
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+      const d = (pa[i] || 0) - (pb[i] || 0);
+      if (d) return d < 0 ? -1 : 1;
+    }
+    return 0;
+  }
+
   function fmt(sec) {
     sec = Math.max(0, Math.floor(sec));
     return Math.floor(sec / 60) + ":" + String(sec % 60).padStart(2, "0");
@@ -353,10 +404,22 @@
       return;
     }
 
+    // outdated → gentle nudge; below the server's floor → stop and demand update
+    const outdated = data.latest_version && cmpVersion(MY_VERSION, data.latest_version) < 0;
+    if (data.min_version && cmpVersion(MY_VERSION, data.min_version) < 0) {
+      updateSiren(false, false, false);
+      body.innerHTML =
+        '<div style="color:#f87171;font-weight:700">⚠ Update required</div>' +
+        '<a href="' +
+        INSTALL_URL +
+        '" target="_blank" style="color:#34d399;font-weight:700;text-decoration:underline">Update the widget →</a>';
+      return;
+    }
+
     const c = data.chain;
     const live = c.id > 0 && c.current > 0 && c.cooldown_s === 0;
-    // extrapolate from when the poller last observed the timer
-    const elapsed = c.observed_at ? Math.floor(Date.now() / 1000) - c.observed_at : 0;
+    // extrapolate from when the poller last observed the timer (server clock)
+    const elapsed = c.observed_at ? nowS() - c.observed_at : 0;
     const remaining = live ? Math.max(0, c.timeout_s - elapsed) : 0;
     const danger = live && remaining <= (data.alert_threshold_s || 90);
     const critical = live && remaining <= 45;
@@ -412,6 +475,13 @@
         link +
         '" target="_blank" style="color:#34d399;font-weight:700;text-decoration:underline">Go apply →</a>';
     }
+    if (outdated) {
+      html +=
+        '<a href="' +
+        INSTALL_URL +
+        '" target="_blank" style="display:block;margin-top:3px;color:#fbbf24;font-size:10px;text-decoration:underline">⬆ Update available</a>';
+    }
+
     body.innerHTML = html;
   }
 
@@ -421,6 +491,7 @@
       url: SITE + "/api/widget?t=" + Date.now(),
       timeout: 10000,
       onload: function (r) {
+        syncClock(r.responseHeaders);
         try {
           const j = JSON.parse(r.responseText);
           if (!j.error) data = j;
@@ -435,7 +506,30 @@
     });
   }
 
+  // poll faster while the chain is in the danger window, slower when it's safe
+  function currentPollMs() {
+    if (data && data.chain) {
+      const c = data.chain;
+      const live = c.id > 0 && c.current > 0 && c.cooldown_s === 0;
+      if (live) {
+        const remaining = c.observed_at
+          ? Math.max(0, c.timeout_s - (nowS() - c.observed_at))
+          : c.timeout_s;
+        if (remaining <= (data.alert_threshold_s || 90)) return POLL_DANGER_MS;
+      }
+    }
+    return POLL_CALM_MS;
+  }
+  let pollTimer = null;
+  function scheduleNextPoll() {
+    if (pollTimer) clearTimeout(pollTimer);
+    pollTimer = setTimeout(function () {
+      poll();
+      scheduleNextPoll();
+    }, currentPollMs());
+  }
+
   poll();
-  setInterval(poll, POLL_MS);
+  scheduleNextPoll();
   setInterval(render, 1000); // smooth countdown + siren check between polls
 })();

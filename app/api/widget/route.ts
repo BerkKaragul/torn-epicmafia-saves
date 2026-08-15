@@ -13,23 +13,30 @@ export const dynamic = "force-dynamic";
 const CORS = { "Access-Control-Allow-Origin": "*" };
 const toS = (iso: string) => Math.floor(Date.parse(iso) / 1000);
 
-// Every faction member's userscript polls this every 12s from every open Torn
-// tab, and cache-busts the URL (?t=…). The payload is IDENTICAL for everyone
+// Version signal for the userscript: it compares its own @version to these.
+// `latest` → the widget shows a gentle "update available" nudge. `min` → the
+// emergency kill floor; installs below it are asked to update and stop.
+// Keep `min` well below any live version so nobody is disabled by accident —
+// bump it ONLY to deliberately force-retire an old version.
+const LATEST_WIDGET_VERSION = "1.6.0";
+const MIN_WIDGET_VERSION = "1.0.0";
+
+// Every faction member's userscript polls this from every open Torn tab (and
+// faster while a chain is in danger). The payload is IDENTICAL for everyone
 // (single faction, unauthenticated), so without this each poll would recompute
-// it from 3 DB reads — the thing that drove Active CPU up. A short in-memory
-// cache collapses a burst of polls to one DB read per window on each warm
-// instance (helps EVERY install, even ones that still cache-bust). The
-// Cache-Control header additionally lets the CDN serve repeat hits with zero
-// invocation for installs that stop cache-busting (userscript >= 1.6.0).
-// TTL is kept short so it never adds meaningful staleness on top of the
-// poller's ~15s cadence.
-const CACHE_MS = 5000;
+// it from 3 DB reads — the thing that drove Fluid Active CPU up. A short
+// in-memory cache collapses a burst of polls to one DB read per window on each
+// warm instance (helps EVERY install, even ones that cache-bust the URL). TTL
+// is kept to 2s: long enough to absorb load, short enough that a fresh poller
+// reading (e.g. a save that just reset the timer) reaches clients quickly — it
+// matters in war, where a stale reading keeps the siren wailing after the hit.
+const CACHE_MS = 2000;
 let cache: { at: number; status: number; body: string } | null = null;
 
 const RESPONSE_HEADERS = {
   ...CORS,
   "Content-Type": "application/json",
-  "Cache-Control": "public, s-maxage=5, stale-while-revalidate=25",
+  "Cache-Control": "public, s-maxage=2, stale-while-revalidate=10",
 };
 
 export function OPTIONS() {
@@ -92,6 +99,8 @@ async function buildFeed(): Promise<{ status: number; body: string }> {
 
   const body = JSON.stringify({
     ok: true,
+    latest_version: LATEST_WIDGET_VERSION,
+    min_version: MIN_WIDGET_VERSION,
     saving_enabled: settings.saving_enabled,
     alert_threshold_s: settings.alert_threshold_s,
     chain: {

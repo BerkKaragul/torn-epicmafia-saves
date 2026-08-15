@@ -10,6 +10,9 @@ export function LiveChain({ initial, myId }: { initial: StatePayload; myId: numb
   const [state, setState] = useState<StatePayload>(initial);
   const [nowS, setNowS] = useState(() => Math.floor(Date.now() / 1000));
   const [soundOn, setSoundOn] = useState(false);
+  // (server clock − this device's clock), refreshed from each response's Date
+  // header so the countdown tracks the server, not a possibly-wrong local clock
+  const clockOffsetMs = useRef(0);
 
   // remember the armed choice across navigation/reloads, shared with the duty
   // page via the same key (read in an effect to avoid an SSR hydration mismatch)
@@ -26,7 +29,14 @@ export function LiveChain({ initial, myId }: { initial: StatePayload; myId: numb
     const fetchState = async () => {
       try {
         const res = await fetch("/api/state");
-        if (res.ok) setState(await res.json());
+        if (res.ok) {
+          const d = res.headers.get("date");
+          if (d) {
+            const t = Date.parse(d);
+            if (!Number.isNaN(t)) clockOffsetMs.current = t - Date.now();
+          }
+          setState(await res.json());
+        }
       } catch {
         /* offline; keep extrapolating */
       }
@@ -61,7 +71,10 @@ export function LiveChain({ initial, myId }: { initial: StatePayload; myId: numb
 
   // 4 fps local tick keeps the countdown smooth between polls
   useEffect(() => {
-    const t = setInterval(() => setNowS(Math.floor(Date.now() / 1000)), 250);
+    const t = setInterval(
+      () => setNowS(Math.floor((Date.now() + clockOffsetMs.current) / 1000)),
+      250,
+    );
     return () => clearInterval(t);
   }, []);
 

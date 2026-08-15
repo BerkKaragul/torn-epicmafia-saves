@@ -18,6 +18,12 @@ export interface ShiftLite {
    * the turn until they're back. Undefined means available.
    */
   available?: boolean;
+  /**
+   * Unix seconds; set when the member taps "skip my turn". Folded into the sort
+   * key so skipping sends them to the back exactly like performing a save would,
+   * but without the pay/stat credit. Null/undefined means never skipped.
+   */
+  deprioritizedAt?: number | null;
 }
 
 export function rotationOrder(shifts: ShiftLite[]): number[] {
@@ -25,7 +31,7 @@ export function rotationOrder(shifts: ShiftLite[]): number[] {
     .filter((s) => s.available !== false)
     .map((s) => ({
       id: s.memberId,
-      key: Math.max(s.startedAt, s.lastSaveAt ?? s.startedAt),
+      key: Math.max(s.startedAt, s.lastSaveAt ?? s.startedAt, s.deprioritizedAt ?? 0),
     }))
     .sort((a, b) => a.key - b.key || a.id - b.id)
     .map((s) => s.id);

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChainWatch Saver Widget
 // @namespace    chainwatch.epicmafia
-// @version      1.6.0
+// @version      1.7.0
 // @description  Shows the current & next chain saver (and timer) from ChainWatch, inside Torn — with the same danger siren as the site (one tab plays, not all).
 // @author       EPIC Mafia
 // @license      MIT
@@ -9,6 +9,7 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_setClipboard
 // @connect      torn-epicmafia-saves.vercel.app
 // @run-at       document-idle
 // ==/UserScript==
@@ -29,6 +30,7 @@
   // air-raid siren sweeping through a dissonant partner tone, chopped by a
   // fast tremolo. `critical` (chain about to die) is faster, higher and louder.
   let audioCtx = null;
+  let sirenVol = GM_getValue("cw_vol", 1); // per-device siren loudness, 0–1
 
   function audio() {
     try {
@@ -62,10 +64,11 @@
     const lowHz = critical ? 620 : 440;
     const highHz = critical ? 1750 : 1150;
 
+    const peak = (critical ? 0.6 : 0.42) * sirenVol;
     const master = c.createGain();
     master.gain.setValueAtTime(0, t0);
-    master.gain.linearRampToValueAtTime(critical ? 0.6 : 0.42, t0 + 0.02);
-    master.gain.setValueAtTime(critical ? 0.6 : 0.42, t0 + dur - 0.08);
+    master.gain.linearRampToValueAtTime(peak, t0 + 0.02);
+    master.gain.setValueAtTime(peak, t0 + dur - 0.08);
     master.gain.linearRampToValueAtTime(0, t0 + dur);
 
     // tremolo: chops the tone so it pulses rather than drones
@@ -236,8 +239,40 @@
     'title="Arm danger siren">' +
     (sirenOn ? "🔊" : "🔇") +
     "</span></div>" +
+    '<input id="cw-vol" data-cw-nodrag="1" type="range" min="0" max="100" ' +
+    'title="Siren volume" ' +
+    'style="width:100%;height:12px;margin:0 0 6px;accent-color:#10b981;cursor:pointer;display:block">' +
     '<div id="cw-body">ChainWatch…</div>';
   document.body.appendChild(box);
+
+  // siren volume slider — persisted per device; preview a blast on release
+  const volSlider = box.querySelector("#cw-vol");
+  volSlider.value = Math.round(sirenVol * 100);
+  volSlider.addEventListener("input", function () {
+    sirenVol = Math.min(1, Math.max(0, Number(this.value) / 100));
+    GM_setValue("cw_vol", sirenVol);
+  });
+  volSlider.addEventListener("change", function () {
+    if (sirenVol > 0) {
+      armAlarm();
+      playAlarm(false);
+    }
+  });
+
+  // optional "I'm here" button (delegated — the body is re-rendered each poll):
+  // copies a ready-to-paste "Saving #<chain> if needed" note to the clipboard
+  box.addEventListener("click", function (e) {
+    const btn = e.target.closest && e.target.closest("#cw-imhere");
+    if (!btn) return;
+    e.stopPropagation();
+    const n = data && data.chain ? data.chain.current : 0;
+    try {
+      GM_setClipboard("Saving #" + n + " if needed");
+      btn.innerHTML = "✅ Copied";
+    } catch (err) {
+      /* clipboard unavailable */
+    }
+  });
 
   // siren toggle — the click also unlocks audio (required on mobile/TornPDA)
   const sirenBtn = box.querySelector("#cw-siren");
@@ -376,7 +411,7 @@
   // compare against our own so we can nudge — or, in an emergency, stop — an
   // outdated install without anyone touching the server.
   const MY_VERSION =
-    (typeof GM_info !== "undefined" && GM_info.script && GM_info.script.version) || "1.6.0";
+    (typeof GM_info !== "undefined" && GM_info.script && GM_info.script.version) || "1.7.0";
   const INSTALL_URL = "https://greasyfork.org/en/scripts/589168-chainwatch-saver-widget";
   function cmpVersion(a, b) {
     const pa = String(a).split(".").map((n) => parseInt(n, 10) || 0);
@@ -422,7 +457,7 @@
     const elapsed = c.observed_at ? nowS() - c.observed_at : 0;
     const remaining = live ? Math.max(0, c.timeout_s - elapsed) : 0;
     const danger = live && remaining <= (data.alert_threshold_s || 90);
-    const critical = live && remaining <= 45;
+    const critical = live && remaining <= Math.round((data.alert_threshold_s || 90) / 2);
     const timerColor = critical ? "#f87171" : danger ? "#fbbf24" : "#34d399";
 
     // scary like the site: glow the box red while the chain is in danger
@@ -461,9 +496,20 @@
       html +=
         '<div style="color:#34d399;font-weight:700">🛡 ' +
         (data.turn || "?") +
+        (data.turn_location
+          ? ' <span style="color:#737373;font-weight:400;font-size:10px">📍' +
+            data.turn_location +
+            "</span>"
+          : "") +
         "</div>";
       if (data.next)
-        html += '<div style="color:#a3a3a3">next: ' + data.next + "</div>";
+        html +=
+          '<div style="color:#a3a3a3">next: ' +
+          data.next +
+          (data.next_location
+            ? ' <span style="color:#737373;font-size:10px">📍' + data.next_location + "</span>"
+            : "") +
+          "</div>";
       html +=
         '<div style="color:#737373;font-size:10px;margin-top:2px">' +
         data.on_duty +
@@ -475,6 +521,16 @@
         link +
         '" target="_blank" style="color:#34d399;font-weight:700;text-decoration:underline">Go apply →</a>';
     }
+    // optional "I'm here" note — only once the chain is getting close (≤1:30)
+    if (live && remaining <= 90) {
+      html +=
+        '<button id="cw-imhere" data-cw-nodrag="1" ' +
+        'title="Copy a ready-to-paste chat note" ' +
+        'style="width:100%;margin-top:5px;padding:3px 6px;font:600 10px/1.2 system-ui;' +
+        'color:#a3a3a3;background:transparent;border:1px dashed #404040;border-radius:6px;cursor:pointer">' +
+        '👋 I&#39;m here <span style="opacity:.55">(optional)</span></button>';
+    }
+
     if (outdated) {
       html +=
         '<a href="' +

@@ -4,12 +4,13 @@ import { useEffect, useRef, useState } from "react";
 import { supabaseBrowser } from "@/lib/supabase-browser";
 import type { StatePayload } from "@/lib/state";
 import { fmtClock } from "@/lib/format";
-import { alarmInterval, armAlarm, playAlarm } from "@/lib/alarm";
+import { alarmInterval, armAlarm, playAlarm, setAlarmVolume } from "@/lib/alarm";
 
 export function LiveChain({ initial, myId }: { initial: StatePayload; myId: number }) {
   const [state, setState] = useState<StatePayload>(initial);
   const [nowS, setNowS] = useState(() => Math.floor(Date.now() / 1000));
   const [soundOn, setSoundOn] = useState(false);
+  const [volume, setVolume] = useState(1); // siren loudness, 0–1, per device
   // (server clock − this device's clock), refreshed from each response's Date
   // header so the countdown tracks the server, not a possibly-wrong local clock
   const clockOffsetMs = useRef(0);
@@ -18,6 +19,10 @@ export function LiveChain({ initial, myId }: { initial: StatePayload; myId: numb
   // page via the same key (read in an effect to avoid an SSR hydration mismatch)
   useEffect(() => {
     if (localStorage.getItem("cw_siren") === "1") setSoundOn(true);
+    const saved = parseInt(localStorage.getItem("cw_volume") ?? "100", 10);
+    const vol = Number.isFinite(saved) ? Math.min(100, Math.max(0, saved)) / 100 : 1;
+    setVolume(vol);
+    setAlarmVolume(vol);
   }, []);
 
   // Realtime "poke" → re-fetch the authenticated /api/state. The public
@@ -83,7 +88,9 @@ export function LiveChain({ initial, myId }: { initial: StatePayload; myId: numb
   const remaining = chainActive ? Math.max(0, state.chain.timeout_s - elapsed) : 0;
   const cooldownLeft = Math.max(0, state.chain.cooldown_s - elapsed);
   const danger = chainActive && remaining <= state.alert_threshold_s;
-  const critical = chainActive && remaining <= 45;
+  // escalate to the intense "critical" siren at half the alert window (was a
+  // fixed 45s, which fired almost immediately when the alert threshold was low)
+  const critical = chainActive && remaining <= Math.round(state.alert_threshold_s / 2);
   const pollerStale = state.poller_at === null || nowS - state.poller_at > 90;
   const myTurn = state.turn_member_id === myId;
 
@@ -143,6 +150,11 @@ export function LiveChain({ initial, myId }: { initial: StatePayload; myId: numb
                 {myTurn ? "🚨 YOUR TURN — GO SAVE!" : "Timer low — saver needed!"}
               </p>
             )}
+            {remaining <= 90 && (
+              <div className="mt-3">
+                <ImHereButton current={state.chain.current} />
+              </div>
+            )}
           </>
         ) : cooldownLeft > 0 ? (
           <>
@@ -163,24 +175,48 @@ export function LiveChain({ initial, myId }: { initial: StatePayload; myId: numb
       </section>
 
       <div className="flex items-center justify-between">
-        <button
-          onClick={() => {
-            const next = !soundOn;
-            if (next) {
-              armAlarm();
-              playAlarm(false); // let them hear exactly what's coming
-            }
-            localStorage.setItem("cw_siren", next ? "1" : "0");
-            setSoundOn(next);
-          }}
-          className={`rounded-md border px-3 py-1.5 text-sm font-medium transition ${
-            soundOn
-              ? "border-emerald-700 bg-emerald-950/50 text-emerald-300"
-              : "border-neutral-700 text-neutral-400 hover:text-neutral-200"
-          }`}
-        >
-          {soundOn ? "🔊 Siren armed" : "🔇 Arm danger siren"}
-        </button>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => {
+              const next = !soundOn;
+              if (next) {
+                armAlarm();
+                playAlarm(false); // let them hear exactly what's coming
+              }
+              localStorage.setItem("cw_siren", next ? "1" : "0");
+              setSoundOn(next);
+            }}
+            className={`rounded-md border px-3 py-1.5 text-sm font-medium transition ${
+              soundOn
+                ? "border-emerald-700 bg-emerald-950/50 text-emerald-300"
+                : "border-neutral-700 text-neutral-400 hover:text-neutral-200"
+            }`}
+          >
+            {soundOn ? "🔊 Siren armed" : "🔇 Arm danger siren"}
+          </button>
+          <label className="flex items-center gap-1 text-xs text-neutral-500" title="Siren volume">
+            🔈
+            <input
+              type="range"
+              min={0}
+              max={100}
+              value={Math.round(volume * 100)}
+              onChange={(e) => {
+                const vol = Number(e.target.value) / 100;
+                setVolume(vol);
+                setAlarmVolume(vol);
+                localStorage.setItem("cw_volume", String(Math.round(vol * 100)));
+              }}
+              onPointerUp={() => {
+                if (volume > 0) {
+                  armAlarm();
+                  playAlarm(false); // preview at the chosen level
+                }
+              }}
+              className="w-20 accent-emerald-500"
+            />
+          </label>
+        </div>
         <a
           href={`https://www.torn.com/factions.php?step=profile&ID=${state.faction_id}`}
           target="_blank"
@@ -228,6 +264,9 @@ export function LiveChain({ initial, myId }: { initial: StatePayload; myId: numb
                 <span className="font-medium">
                   {m.name}
                   {m.id === myId && <span className="ml-1.5 text-xs text-emerald-500">(you)</span>}
+                  {m.location && (
+                    <span className="ml-2 text-xs font-normal text-neutral-500">📍 {m.location}</span>
+                  )}
                   {m.unavailable_state && (
                     <span className="ml-2 rounded bg-amber-900/60 px-1.5 py-0.5 text-xs font-semibold text-amber-300">
                       {m.unavailable_state === "Traveling"
@@ -268,5 +307,28 @@ export function LiveChain({ initial, myId }: { initial: StatePayload; myId: numb
         </section>
       )}
     </div>
+  );
+}
+
+// Optional, low-key "I'm here" — copies a ready-to-paste note for faction chat.
+// Deliberately understated (dashed, muted) so it never reads as mandatory.
+function ImHereButton({ current }: { current: number }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      onClick={async () => {
+        try {
+          await navigator.clipboard.writeText(`Saving #${current} if needed`);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 2000);
+        } catch {
+          /* clipboard blocked */
+        }
+      }}
+      title="Copy a ready-to-paste chat note"
+      className="rounded-md border border-dashed border-neutral-600 px-3 py-1 text-xs font-medium text-neutral-400 transition hover:text-neutral-200"
+    >
+      {copied ? "✅ Copied" : "👋 I'm here (optional)"}
+    </button>
   );
 }

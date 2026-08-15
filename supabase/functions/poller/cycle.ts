@@ -34,6 +34,8 @@ interface ActiveShiftRow {
   last_save_at: string | null;
   unavailable_state: string | null;
   abroad: boolean;
+  location: string | null;
+  deprioritized_at: string | null;
   hourly_rate_snapshot: number | string;
   members: MemberKeyRow;
 }
@@ -96,6 +98,25 @@ function normalizeRemainingS(raw: number, nowS: number): number {
   return Math.max(0, raw);
 }
 
+/**
+ * The country a saver is currently in, for display — parsed from Torn's member
+ * status description. Null while home (Okay) or blocked (hospital/jail); those
+ * states are already surfaced via unavailable_state.
+ */
+function parseCountry(state: string, description: string | undefined): string | null {
+  if (!description) return null;
+  const d = description.trim();
+  if (state === "Traveling") {
+    const m = d.match(/^(?:Traveling to|Returning to Torn from) (.+)$/i);
+    return m ? m[1] : null;
+  }
+  if (state === "Abroad") {
+    const m = d.match(/^In (.+)$/i);
+    return m ? m[1] : null;
+  }
+  return null;
+}
+
 export async function runPollCycle(): Promise<void> {
   const db = sb();
   const nowS = Math.floor(Date.now() / 1000);
@@ -106,6 +127,10 @@ export async function runPollCycle(): Promise<void> {
   ]);
   if (!settingsRow || !state0) return;
   const settings = settingsRow as PollerSettings;
+  // "critical" (last-chance) siren/notification tier fires at half the alert
+  // window, matching the clients — replaces a fixed 45s that triggered almost
+  // immediately when the alert threshold was set low.
+  const criticalThresholdS = Math.round(settings.alert_threshold_s / 2);
 
   const prevObs: ChainObservation | null = state0.last_poll_at
     ? {
@@ -154,7 +179,7 @@ export async function runPollCycle(): Promise<void> {
     const { data: activeShiftsRaw } = await db
       .from("shifts")
       .select(
-        `id, member_id, started_at, planned_minutes, last_save_at, unavailable_state, abroad, hourly_rate_snapshot, members!inner(${MEMBER_KEY_COLS})`,
+        `id, member_id, started_at, planned_minutes, last_save_at, unavailable_state, abroad, location, deprioritized_at, hourly_rate_snapshot, members!inner(${MEMBER_KEY_COLS})`,
       )
       .is("ended_at", null)
       .returns<ActiveShiftRow[]>();
@@ -281,8 +306,8 @@ export async function runPollCycle(): Promise<void> {
         });
       } else if (ev.type === "timer_low") {
         // two alert tiers per hit-episode: first crossing the threshold, and
-        // a last-chance escalation at ≤45s if nobody has hit yet
-        const tier = ev.timeoutS <= 45 ? "critical" : "low";
+        // a last-chance escalation at ≤ half the alert window if nobody has hit
+        const tier = ev.timeoutS <= criticalThresholdS ? "critical" : "low";
         const fullKey = `${ev.episodeKey}:${tier}`;
         if (fullKey !== dangerEpisodeKey) {
           dangerEpisodeKey = fullKey;
@@ -346,7 +371,7 @@ export async function runPollCycle(): Promise<void> {
     const nowDangerous =
       obsActive && obs.timeoutS <= settings.alert_threshold_s && activeShifts.length > 0;
     if (headBailed && nowDangerous) {
-      const tier = obs.timeoutS <= 45 ? "critical" : "low";
+      const tier = obs.timeoutS <= criticalThresholdS ? "critical" : "low";
       await alertDanger(
         db,
         activeShifts,
@@ -967,6 +992,7 @@ function toShiftLites(shifts: ActiveShiftRow[]): ShiftLite[] {
     startedAt: toS(s.started_at),
     lastSaveAt: s.last_save_at ? toS(s.last_save_at) : null,
     available: !s.unavailable_state,
+    deprioritizedAt: s.deprioritized_at ? toS(s.deprioritized_at) : null,
   }));
 }
 
@@ -988,11 +1014,19 @@ async function syncAvailability(
     console.error("availability check failed:", e);
     return activeShifts; // keep last known state rather than guessing
   }
-  const stateById = new Map(roster.map((m) => [m.id, m.status?.state ?? "Okay"]));
+  const infoById = new Map(roster.map((m) => [m.id, m.status ?? null]));
   const nowIso = new Date().toISOString();
 
   for (const shift of activeShifts) {
-    const state = stateById.get(shift.member_id) ?? "Okay";
+    const status = infoById.get(shift.member_id) ?? null;
+    const state = status?.state ?? "Okay";
+
+    // country shown next to the saver's name (null = home / not abroad)
+    const country = parseCountry(state, status?.description);
+    if (country !== shift.location) {
+      await db.from("shifts").update({ location: country }).eq("id", shift.id);
+      shift.location = country;
+    }
 
     // Hourly pay only accrues while a saver is abroad (saves are done in another
     // country); being home in the main city earns nothing. This is a pay gate

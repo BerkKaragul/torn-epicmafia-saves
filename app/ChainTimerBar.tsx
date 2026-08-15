@@ -61,7 +61,7 @@ export function ChainTimerBar() {
   const remaining = live ? Math.max(0, state.chain.timeout_s - elapsed) : 0;
   const cooldown = Math.max(0, state.chain.cooldown_s - elapsed);
   const danger = live && remaining <= state.alert_threshold_s;
-  const critical = live && remaining <= 45;
+  const critical = live && remaining <= Math.round(state.alert_threshold_s / 2);
   const stale = state.poller_at === null || nowS - state.poller_at > 90;
   const onDuty = state.on_duty.filter((m) => !m.unavailable_state).length;
 

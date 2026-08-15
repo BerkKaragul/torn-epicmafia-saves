@@ -77,13 +77,14 @@ export async function PATCH(req: Request) {
   // was this member the rotation head at the moment they bailed?
   const { data: active } = await db()
     .from("shifts")
-    .select("member_id, started_at, last_save_at")
+    .select("member_id, started_at, last_save_at, deprioritized_at")
     .is("ended_at", null);
   const order = rotationOrder(
     (active ?? []).map((s) => ({
       memberId: s.member_id,
       startedAt: Math.floor(Date.parse(s.started_at) / 1000),
       lastSaveAt: s.last_save_at ? Math.floor(Date.parse(s.last_save_at) / 1000) : null,
+      deprioritizedAt: s.deprioritized_at ? Math.floor(Date.parse(s.deprioritized_at) / 1000) : null,
     })),
   );
   const wasHead = order[0] === member.torn_id;

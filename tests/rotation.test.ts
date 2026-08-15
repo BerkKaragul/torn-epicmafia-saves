@@ -74,6 +74,29 @@ describe("rotationOrder: availability", () => {
   });
 });
 
+describe("rotationOrder: skip my turn", () => {
+  test("sends a saver to the back when they skip their turn", () => {
+    const order = rotationOrder([
+      { ...shift(1, 50), deprioritizedAt: 200 },
+      shift(2, 100),
+      shift(3, 150),
+    ]);
+    expect(order).toEqual([2, 3, 1]);
+  });
+
+  test("a skip does not un-back a more recent save", () => {
+    // member 2 saved at 300; a skip stamped at 100 is older, so key stays 300
+    const order = rotationOrder([shift(1, 250), { ...shift(2, 50, 300), deprioritizedAt: 100 }]);
+    expect(order).toEqual([1, 2]);
+  });
+
+  test("treats a missing deprioritizedAt as never skipped", () => {
+    expect(
+      rotationOrder([shift(1, 50), { ...shift(2, 100), deprioritizedAt: null }]),
+    ).toEqual([1, 2]);
+  });
+});
+
 describe("turnMemberId", () => {
   test("is the head of the rotation", () => {
     expect(turnMemberId([shift(1, 100), shift(2, 50)])).toBe(2);

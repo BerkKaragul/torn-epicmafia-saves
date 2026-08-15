@@ -44,6 +44,10 @@ export interface ShiftRow {
   last_save_at: string | null;
   unavailable_state: string | null;
   abroad: boolean;
+  /** Country the saver is currently in (null = home / not abroad). */
+  location: string | null;
+  /** Set when the saver taps "skip my turn" — pushes them to the back. */
+  deprioritized_at: string | null;
   payout_line_id: string | null;
 }
 

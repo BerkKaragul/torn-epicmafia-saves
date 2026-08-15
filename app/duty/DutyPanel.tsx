@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { currentPushStatus, disablePush, enablePush, type PushStatus } from "./push";
 import { fmtClock, fmtDuration, fmtMoney } from "@/lib/format";
-import { alarmInterval, armAlarm, playAlarm } from "@/lib/alarm";
+import { alarmInterval, armAlarm, playAlarm, setAlarmVolume } from "@/lib/alarm";
 import { supabaseBrowser } from "@/lib/supabase-browser";
 
 interface Me {
@@ -50,12 +50,17 @@ export function DutyPanel() {
   const [stopping, setStopping] = useState(false);
   const [leaveMsg, setLeaveMsg] = useState("");
   const [sirenOn, setSirenOn] = useState(false);
+  const [volume, setVolume] = useState(1); // siren loudness, 0–1, per device
   const sirenRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // remember whether the siren was armed, across page navigation/reloads
   // (read in an effect, not initial state, to avoid an SSR hydration mismatch)
   useEffect(() => {
     if (localStorage.getItem("cw_siren") === "1") setSirenOn(true);
+    const saved = parseInt(localStorage.getItem("cw_volume") ?? "100", 10);
+    const vol = Number.isFinite(saved) ? Math.min(100, Math.max(0, saved)) / 100 : 1;
+    setVolume(vol);
+    setAlarmVolume(vol);
   }, []);
 
   const load = useCallback(async () => {
@@ -126,13 +131,26 @@ export function DutyPanel() {
     }
   }
 
+  async function skipTurn() {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/shifts/skip", { method: "POST" });
+      const body = await res.json();
+      if (!res.ok) setError(body.error);
+      await load();
+    } finally {
+      setBusy(false);
+    }
+  }
+
   // live chain countdown, extrapolated between poller updates
   const nowS = Math.floor(nowTick / 1000);
   const chainLive = !!me && me.chain.id > 0 && me.chain.current > 0 && me.chain.cooldown_s === 0;
   const chainRemaining =
     me && chainLive ? Math.max(0, me.chain.timeout_s - (nowS - me.chain.observed_at)) : 0;
   const chainDanger = !!me && chainLive && chainRemaining <= me.alert_threshold_s;
-  const chainCritical = chainLive && chainRemaining <= 45;
+  const chainCritical = chainLive && chainRemaining <= Math.round((me?.alert_threshold_s ?? 90) / 2);
 
   // siren while the chain is in danger (armed by the user, browsers require it)
   useEffect(() => {
@@ -196,24 +214,48 @@ export function DutyPanel() {
               {me.chain.cooldown_s > 0 ? "Chain on cooldown" : "No chain running"}
             </span>
           )}
-          <button
-            onClick={() => {
-              const next = !sirenOn;
-              if (next) {
-                armAlarm();
-                playAlarm(false);
-              }
-              localStorage.setItem("cw_siren", next ? "1" : "0");
-              setSirenOn(next);
-            }}
-            className={`ml-auto rounded-md border px-3 py-1.5 text-xs font-semibold transition ${
-              sirenOn
-                ? "border-emerald-700 bg-emerald-950/50 text-emerald-300"
-                : "border-neutral-700 text-neutral-400 hover:text-neutral-200"
-            }`}
-          >
-            {sirenOn ? "🔊 Siren armed" : "🔇 Arm danger siren"}
-          </button>
+          <div className="ml-auto flex items-center gap-2">
+            <button
+              onClick={() => {
+                const next = !sirenOn;
+                if (next) {
+                  armAlarm();
+                  playAlarm(false);
+                }
+                localStorage.setItem("cw_siren", next ? "1" : "0");
+                setSirenOn(next);
+              }}
+              className={`rounded-md border px-3 py-1.5 text-xs font-semibold transition ${
+                sirenOn
+                  ? "border-emerald-700 bg-emerald-950/50 text-emerald-300"
+                  : "border-neutral-700 text-neutral-400 hover:text-neutral-200"
+              }`}
+            >
+              {sirenOn ? "🔊 Siren armed" : "🔇 Arm danger siren"}
+            </button>
+            <label className="flex items-center gap-1 text-xs text-neutral-500" title="Siren volume">
+              🔈
+              <input
+                type="range"
+                min={0}
+                max={100}
+                value={Math.round(volume * 100)}
+                onChange={(e) => {
+                  const vol = Number(e.target.value) / 100;
+                  setVolume(vol);
+                  setAlarmVolume(vol);
+                  localStorage.setItem("cw_volume", String(Math.round(vol * 100)));
+                }}
+                onPointerUp={() => {
+                  if (volume > 0) {
+                    armAlarm();
+                    playAlarm(false); // preview at the chosen level
+                  }
+                }}
+                className="w-16 accent-emerald-500"
+              />
+            </label>
+          </div>
         </div>
       </section>
 
@@ -320,13 +362,23 @@ export function DutyPanel() {
               </div>
             </div>
           ) : (
-            <button
-              onClick={() => setStopping(true)}
-              disabled={busy}
-              className="mt-4 rounded-md bg-red-700 px-4 py-2 font-semibold text-white transition hover:bg-red-600 disabled:opacity-40"
-            >
-              Stop saving
-            </button>
+            <div className="mt-4 flex flex-wrap gap-2">
+              <button
+                onClick={skipTurn}
+                disabled={busy}
+                title="Pass your turn to the next saver — you keep your shift and pay"
+                className="rounded-md border border-amber-700 bg-amber-950/40 px-4 py-2 font-semibold text-amber-300 transition hover:bg-amber-900/40 disabled:opacity-40"
+              >
+                ⏭ Skip my turn
+              </button>
+              <button
+                onClick={() => setStopping(true)}
+                disabled={busy}
+                className="rounded-md bg-red-700 px-4 py-2 font-semibold text-white transition hover:bg-red-600 disabled:opacity-40"
+              >
+                Stop saving
+              </button>
+            </div>
           )}
         </section>
       ) : (

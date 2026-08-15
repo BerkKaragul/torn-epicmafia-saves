@@ -19,6 +19,7 @@ export interface StatePayload {
     started_at: number;
     last_save_at: number | null;
     unavailable_state: string | null;
+    location: string | null;
   }[];
   turn_member_id: number | null;
   last_save: {
@@ -60,6 +61,7 @@ export async function buildStatePayload(): Promise<StatePayload> {
     startedAt: toS(s.started_at),
     lastSaveAt: s.last_save_at ? toS(s.last_save_at) : null,
     available: !s.unavailable_state,
+    deprioritizedAt: s.deprioritized_at ? toS(s.deprioritized_at) : null,
   }));
   const order = rotationOrder(lites);
   // paused savers keep their shift but drop out of the turn order — list them
@@ -84,6 +86,7 @@ export async function buildStatePayload(): Promise<StatePayload> {
         started_at: toS(s.started_at),
         last_save_at: s.last_save_at ? toS(s.last_save_at) : null,
         unavailable_state: s.unavailable_state,
+        location: s.location,
       };
     }),
     turn_member_id: turnMemberId(lites),

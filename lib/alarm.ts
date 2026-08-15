@@ -6,6 +6,15 @@
 
 let ctx: AudioContext | null = null;
 
+// Per-device master volume (0–1). Set from the UI slider; persisted by callers.
+let alarmVolume = 1;
+export function setAlarmVolume(v: number): void {
+  alarmVolume = Math.min(1, Math.max(0, v));
+}
+export function getAlarmVolume(): number {
+  return alarmVolume;
+}
+
 function audio(): AudioContext | null {
   try {
     ctx ??= new AudioContext();
@@ -44,10 +53,11 @@ export function playAlarm(critical: boolean): void {
   const lowHz = critical ? 620 : 440;
   const highHz = critical ? 1750 : 1150;
 
+  const peak = (critical ? 0.6 : 0.42) * alarmVolume;
   const master = c.createGain();
   master.gain.setValueAtTime(0, t0);
-  master.gain.linearRampToValueAtTime(critical ? 0.6 : 0.42, t0 + 0.02);
-  master.gain.setValueAtTime(critical ? 0.6 : 0.42, t0 + dur - 0.08);
+  master.gain.linearRampToValueAtTime(peak, t0 + 0.02);
+  master.gain.setValueAtTime(peak, t0 + dur - 0.08);
   master.gain.linearRampToValueAtTime(0, t0 + dur);
 
   // tremolo: chops the tone so it pulses rather than drones

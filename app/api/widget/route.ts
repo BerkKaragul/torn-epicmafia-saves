@@ -18,7 +18,7 @@ const toS = (iso: string) => Math.floor(Date.parse(iso) / 1000);
 // emergency kill floor; installs below it are asked to update and stop.
 // Keep `min` well below any live version so nobody is disabled by accident —
 // bump it ONLY to deliberately force-retire an old version.
-const LATEST_WIDGET_VERSION = "1.6.0";
+const LATEST_WIDGET_VERSION = "1.7.0";
 const MIN_WIDGET_VERSION = "1.0.0";
 
 // Every faction member's userscript polls this from every open Torn tab (and
@@ -70,7 +70,9 @@ async function buildFeed(): Promise<{ status: number; body: string }> {
       .maybeSingle(),
     db()
       .from("shifts")
-      .select("member_id, started_at, last_save_at, unavailable_state, members!inner(name)")
+      .select(
+        "member_id, started_at, last_save_at, unavailable_state, location, deprioritized_at, members!inner(name)",
+      )
       .is("ended_at", null),
   ]);
 
@@ -79,6 +81,8 @@ async function buildFeed(): Promise<{ status: number; body: string }> {
     started_at: string;
     last_save_at: string | null;
     unavailable_state: string | null;
+    location: string | null;
+    deprioritized_at: string | null;
     members: { name: string } | { name: string }[];
   };
   const active = (shifts ?? []) as Row[];
@@ -87,6 +91,7 @@ async function buildFeed(): Promise<{ status: number; body: string }> {
     if (!s) return null;
     return Array.isArray(s.members) ? (s.members[0]?.name ?? null) : s.members.name;
   };
+  const locationOf = (id: number) => active.find((x) => x.member_id === id)?.location ?? null;
 
   const order = rotationOrder(
     active.map((s) => ({
@@ -94,6 +99,7 @@ async function buildFeed(): Promise<{ status: number; body: string }> {
       startedAt: toS(s.started_at),
       lastSaveAt: s.last_save_at ? toS(s.last_save_at) : null,
       available: !s.unavailable_state,
+      deprioritizedAt: s.deprioritized_at ? toS(s.deprioritized_at) : null,
     })),
   );
 
@@ -112,7 +118,9 @@ async function buildFeed(): Promise<{ status: number; body: string }> {
       observed_at: state?.last_poll_at ? toS(state.last_poll_at) : 0,
     },
     turn: order[0] ? nameOf(order[0]) : null,
+    turn_location: order[0] ? locationOf(order[0]) : null,
     next: order[1] ? nameOf(order[1]) : null,
+    next_location: order[1] ? locationOf(order[1]) : null,
     on_duty: order.length,
     total_on_duty: active.length,
   });

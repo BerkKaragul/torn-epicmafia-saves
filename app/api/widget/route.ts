@@ -18,7 +18,7 @@ const toS = (iso: string) => Math.floor(Date.parse(iso) / 1000);
 // emergency kill floor; installs below it are asked to update and stop.
 // Keep `min` well below any live version so nobody is disabled by accident —
 // bump it ONLY to deliberately force-retire an old version.
-const LATEST_WIDGET_VERSION = "1.7.0";
+const LATEST_WIDGET_VERSION = "1.8.0";
 const MIN_WIDGET_VERSION = "1.0.0";
 
 // Every faction member's userscript polls this from every open Torn tab (and
@@ -123,6 +123,9 @@ async function buildFeed(): Promise<{ status: number; body: string }> {
     next_location: order[1] ? locationOf(order[1]) : null,
     on_duty: order.length,
     total_on_duty: active.length,
+    // all on-duty saver names (already public) so the widget can tell whether
+    // the viewer is currently a saver, for the "only alarm when I'm saving" opt
+    on_duty_names: active.map((s) => nameOf(s.member_id)).filter(Boolean),
   });
   return { status: 200, body };
 }

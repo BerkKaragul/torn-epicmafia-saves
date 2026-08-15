@@ -51,12 +51,14 @@ export function DutyPanel() {
   const [leaveMsg, setLeaveMsg] = useState("");
   const [sirenOn, setSirenOn] = useState(false);
   const [volume, setVolume] = useState(1); // siren loudness, 0–1, per device
+  const [onlyWhenDuty, setOnlyWhenDuty] = useState(false); // siren only while on duty
   const sirenRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // remember whether the siren was armed, across page navigation/reloads
   // (read in an effect, not initial state, to avoid an SSR hydration mismatch)
   useEffect(() => {
     if (localStorage.getItem("cw_siren") === "1") setSirenOn(true);
+    if (localStorage.getItem("cw_onlyduty") === "1") setOnlyWhenDuty(true);
     const saved = parseInt(localStorage.getItem("cw_volume") ?? "100", 10);
     const vol = Number.isFinite(saved) ? Math.min(100, Math.max(0, saved)) / 100 : 1;
     setVolume(vol);
@@ -151,6 +153,7 @@ export function DutyPanel() {
     me && chainLive ? Math.max(0, me.chain.timeout_s - (nowS - me.chain.observed_at)) : 0;
   const chainDanger = !!me && chainLive && chainRemaining <= me.alert_threshold_s;
   const chainCritical = chainLive && chainRemaining <= Math.round((me?.alert_threshold_s ?? 90) / 2);
+  const iAmSaver = !!me?.activeShift;
 
   // siren while the chain is in danger (armed by the user, browsers require it)
   useEffect(() => {
@@ -158,14 +161,14 @@ export function DutyPanel() {
       clearInterval(sirenRef.current);
       sirenRef.current = null;
     }
-    if (!sirenOn || !chainDanger) return;
+    if (!sirenOn || !chainDanger || (onlyWhenDuty && !iAmSaver)) return;
     playAlarm(chainCritical);
     sirenRef.current = setInterval(() => playAlarm(chainCritical), alarmInterval(chainCritical));
     return () => {
       if (sirenRef.current) clearInterval(sirenRef.current);
       sirenRef.current = null;
     };
-  }, [sirenOn, chainDanger, chainCritical]);
+  }, [sirenOn, chainDanger, chainCritical, onlyWhenDuty, iAmSaver]);
 
   if (!me) return <p className="text-neutral-500">Loading…</p>;
 
@@ -254,6 +257,21 @@ export function DutyPanel() {
                 }}
                 className="w-16 accent-emerald-500"
               />
+            </label>
+            <label
+              className="flex items-center gap-1 text-xs text-neutral-400"
+              title="Only sound the siren while you're on saver duty"
+            >
+              <input
+                type="checkbox"
+                checked={onlyWhenDuty}
+                onChange={(e) => {
+                  setOnlyWhenDuty(e.target.checked);
+                  localStorage.setItem("cw_onlyduty", e.target.checked ? "1" : "0");
+                }}
+                className="accent-emerald-500"
+              />
+              only when I&apos;m saving
             </label>
           </div>
         </div>

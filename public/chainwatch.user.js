@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChainWatch Saver Widget
 // @namespace    chainwatch.epicmafia
-// @version      1.7.0
+// @version      1.8.0
 // @description  Shows the current & next chain saver (and timer) from ChainWatch, inside Torn — with the same danger siren as the site (one tab plays, not all).
 // @author       EPIC Mafia
 // @license      MIT
@@ -31,6 +31,8 @@
   // fast tremolo. `critical` (chain about to die) is faster, higher and louder.
   let audioCtx = null;
   let sirenVol = GM_getValue("cw_vol", 1); // per-device siren loudness, 0–1
+  let onlyDuty = GM_getValue("cw_onlyduty", false); // only alarm while I'm a saver
+  let myName = GM_getValue("cw_myname", ""); // my Torn name, for the saver check
 
   function audio() {
     try {
@@ -242,6 +244,13 @@
     '<input id="cw-vol" data-cw-nodrag="1" type="range" min="0" max="100" ' +
     'title="Siren volume" ' +
     'style="width:100%;height:12px;margin:0 0 6px;accent-color:#10b981;cursor:pointer;display:block">' +
+    '<label data-cw-nodrag="1" style="display:flex;align-items:center;gap:4px;font-size:10px;' +
+    'color:#a3a3a3;margin-bottom:4px;cursor:pointer">' +
+    '<input id="cw-onlyduty" type="checkbox" style="accent-color:#10b981;cursor:pointer">' +
+    'only alarm when I&#39;m saving</label>' +
+    '<input id="cw-myname" data-cw-nodrag="1" type="text" placeholder="your exact Torn name" ' +
+    'style="display:none;width:100%;box-sizing:border-box;margin:0 0 6px;padding:2px 5px;' +
+    'font-size:10px;background:#171717;border:1px solid #404040;border-radius:5px;color:#e5e5e5">' +
     '<div id="cw-body">ChainWatch…</div>';
   document.body.appendChild(box);
 
@@ -257,6 +266,24 @@
       armAlarm();
       playAlarm(false);
     }
+  });
+
+  // "only alarm when I'm saving" — the widget is anonymous, so you enter your
+  // Torn name once (the box appears only when the option is on) and we match it
+  // against the on-duty roster from the feed
+  const onlyDutyBox = box.querySelector("#cw-onlyduty");
+  const myNameInput = box.querySelector("#cw-myname");
+  onlyDutyBox.checked = onlyDuty;
+  myNameInput.value = myName;
+  myNameInput.style.display = onlyDuty ? "block" : "none";
+  onlyDutyBox.addEventListener("change", function () {
+    onlyDuty = this.checked;
+    GM_setValue("cw_onlyduty", onlyDuty);
+    myNameInput.style.display = onlyDuty ? "block" : "none";
+  });
+  myNameInput.addEventListener("input", function () {
+    myName = this.value.trim();
+    GM_setValue("cw_myname", myName);
   });
 
   // optional "I'm here" button (delegated — the body is re-rendered each poll):
@@ -411,7 +438,7 @@
   // compare against our own so we can nudge — or, in an emergency, stop — an
   // outdated install without anyone touching the server.
   const MY_VERSION =
-    (typeof GM_info !== "undefined" && GM_info.script && GM_info.script.version) || "1.7.0";
+    (typeof GM_info !== "undefined" && GM_info.script && GM_info.script.version) || "1.8.0";
   const INSTALL_URL = "https://greasyfork.org/en/scripts/589168-chainwatch-saver-widget";
   function cmpVersion(a, b) {
     const pa = String(a).split(".").map((n) => parseInt(n, 10) || 0);
@@ -469,8 +496,16 @@
       box.style.boxShadow = "0 4px 14px rgba(0,0,0,.5)";
     }
 
+    // "only when I'm saving" mutes the sound (not the visuals) unless my name is
+    // on the on-duty roster; with no name set yet, never mute (don't silently
+    // miss an alarm)
+    const names = (data && data.on_duty_names) || [];
+    const iAmSaver =
+      !!myName && names.some((n) => n && n.toLowerCase() === myName.toLowerCase());
+    const sirenMuted = onlyDuty && !!myName && !iAmSaver;
+
     // keep the audible alarm in lockstep with the site's logic
-    updateSiren(live, danger, critical);
+    updateSiren(live, danger && !sirenMuted, critical);
 
     let html = "";
     if (live) {

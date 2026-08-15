@@ -11,6 +11,7 @@ export function LiveChain({ initial, myId }: { initial: StatePayload; myId: numb
   const [nowS, setNowS] = useState(() => Math.floor(Date.now() / 1000));
   const [soundOn, setSoundOn] = useState(false);
   const [volume, setVolume] = useState(1); // siren loudness, 0–1, per device
+  const [onlyWhenDuty, setOnlyWhenDuty] = useState(false); // siren only if I'm a saver
   // (server clock − this device's clock), refreshed from each response's Date
   // header so the countdown tracks the server, not a possibly-wrong local clock
   const clockOffsetMs = useRef(0);
@@ -19,6 +20,7 @@ export function LiveChain({ initial, myId }: { initial: StatePayload; myId: numb
   // page via the same key (read in an effect to avoid an SSR hydration mismatch)
   useEffect(() => {
     if (localStorage.getItem("cw_siren") === "1") setSoundOn(true);
+    if (localStorage.getItem("cw_onlyduty") === "1") setOnlyWhenDuty(true);
     const saved = parseInt(localStorage.getItem("cw_volume") ?? "100", 10);
     const vol = Number.isFinite(saved) ? Math.min(100, Math.max(0, saved)) / 100 : 1;
     setVolume(vol);
@@ -93,6 +95,7 @@ export function LiveChain({ initial, myId }: { initial: StatePayload; myId: numb
   const critical = chainActive && remaining <= Math.round(state.alert_threshold_s / 2);
   const pollerStale = state.poller_at === null || nowS - state.poller_at > 90;
   const myTurn = state.turn_member_id === myId;
+  const iAmSaver = state.on_duty.some((m) => m.id === myId);
 
   // tab title
   useEffect(() => {
@@ -103,11 +106,11 @@ export function LiveChain({ initial, myId }: { initial: StatePayload; myId: numb
 
   // danger siren (armed by the user toggle — browsers require a gesture)
   useEffect(() => {
-    if (!soundOn || !danger) return;
+    if (!soundOn || !danger || (onlyWhenDuty && !iAmSaver)) return;
     playAlarm(critical);
     const id = setInterval(() => playAlarm(critical), alarmInterval(critical));
     return () => clearInterval(id);
-  }, [soundOn, danger, critical]);
+  }, [soundOn, danger, critical, onlyWhenDuty, iAmSaver]);
 
   return (
     <div className="flex flex-col gap-4">
@@ -215,6 +218,21 @@ export function LiveChain({ initial, myId }: { initial: StatePayload; myId: numb
               }}
               className="w-20 accent-emerald-500"
             />
+          </label>
+          <label
+            className="flex items-center gap-1 text-xs text-neutral-400"
+            title="Only sound the siren while you're on saver duty"
+          >
+            <input
+              type="checkbox"
+              checked={onlyWhenDuty}
+              onChange={(e) => {
+                setOnlyWhenDuty(e.target.checked);
+                localStorage.setItem("cw_onlyduty", e.target.checked ? "1" : "0");
+              }}
+              className="accent-emerald-500"
+            />
+            only when I&apos;m saving
           </label>
         </div>
         <a

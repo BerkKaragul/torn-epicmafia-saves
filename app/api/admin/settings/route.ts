@@ -63,8 +63,8 @@ export async function PATCH(req: Request) {
     return NextResponse.json({ error: "Save threshold must be 10–290s" }, { status: 400 });
   }
   const pollInterval = patch.poll_interval_s;
-  if (typeof pollInterval === "number" && pollInterval < 15) {
-    return NextResponse.json({ error: "Poll interval can't go below 15s" }, { status: 400 });
+  if (typeof pollInterval === "number" && pollInterval < 10) {
+    return NextResponse.json({ error: "Poll interval can't go below 10s" }, { status: 400 });
   }
   if (Object.keys(patch).length === 0) {
     return NextResponse.json({ error: "Nothing to update" }, { status: 400 });

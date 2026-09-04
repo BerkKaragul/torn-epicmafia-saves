@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
+import { Decor } from "./Decor";
 
 export const metadata: Metadata = {
   title: "ChainWatch — EPIC Mafia",
@@ -19,6 +20,7 @@ export default function RootLayout({
     <html lang="en" className="dark">
       <body className="min-h-screen bg-neutral-950 text-neutral-100 antialiased">
         {children}
+        <Decor />
       </body>
     </html>
   );

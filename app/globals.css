@@ -8,3 +8,19 @@ html,
 body {
   height: 100%;
 }
+
+/* Gentle bob for the beach-decor emoji in the side gutters (see Decor.tsx). */
+@keyframes cwFloat {
+  0%,
+  100% {
+    transform: translateY(0) rotate(var(--cw-rot, 0deg));
+  }
+  50% {
+    transform: translateY(-14px) rotate(calc(var(--cw-rot, 0deg) + 5deg));
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cw-float {
+    animation: none !important;
+  }
+}

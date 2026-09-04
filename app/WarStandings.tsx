@@ -7,7 +7,16 @@ interface Row {
   member_id: number;
   name: string;
   saves: number;
+  save_seconds: number;
   save_pay: number;
+}
+
+// Compact duty duration, e.g. "4h 15m", "45m", "0m".
+function fmtDur(seconds: number): string {
+  const total = Math.max(0, Math.floor(seconds / 60));
+  const h = Math.floor(total / 60);
+  const m = total % 60;
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
 interface Standings {
   war: { opponent_name: string; started_at: string } | null;
@@ -44,13 +53,16 @@ export function WarStandings({ myId }: { myId: number }) {
   if (!data || !data.war || data.rows.length === 0) return null;
 
   const total = data.rows.reduce((s, r) => s + r.save_pay, 0);
+  const totalSecs = data.rows.reduce((s, r) => s + r.save_seconds, 0);
 
   return (
     <section className="rounded-xl border border-neutral-800 bg-neutral-900 p-5 text-sm">
       <div className="flex flex-wrap items-baseline gap-2">
         <h2 className="font-bold">Save pay — live war</h2>
         <span className="text-xs text-neutral-500">vs {data.war.opponent_name}</span>
-        <span className="ml-auto text-xs text-neutral-500">{fmtMoney(total)} total</span>
+        <span className="ml-auto text-xs text-neutral-500">
+          {fmtMoney(total)} · {fmtDur(totalSecs)} total
+        </span>
       </div>
       <p className="mt-1 text-xs text-neutral-600">
         Hourly save pay earned in this war so far, highest first. Per-save bonuses are usually
@@ -63,6 +75,7 @@ export function WarStandings({ myId }: { myId: number }) {
             <tr>
               <th className="py-1.5 pr-3">Saver</th>
               <th className="py-1.5 pr-3 text-right">Save pay</th>
+              <th className="py-1.5 pr-3 text-right">Time</th>
               <th className="py-1.5 text-right">Saves</th>
             </tr>
           </thead>
@@ -77,6 +90,9 @@ export function WarStandings({ myId }: { myId: number }) {
                 </td>
                 <td className="py-2 pr-3 text-right tabular-nums text-emerald-300">
                   {fmtMoney(r.save_pay)}
+                </td>
+                <td className="py-2 pr-3 text-right tabular-nums text-neutral-400">
+                  {fmtDur(r.save_seconds)}
                 </td>
                 <td className="py-2 text-right tabular-nums text-neutral-400">{r.saves || "—"}</td>
               </tr>

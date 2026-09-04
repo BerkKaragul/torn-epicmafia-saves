@@ -12,6 +12,7 @@ interface WarReportRow {
   member_id: number;
   name: string;
   saves: number;
+  save_seconds: number;
   chain_pay: number;
 }
 
@@ -41,9 +42,10 @@ export async function GET() {
       member_id: r.member_id,
       name: r.name,
       saves: Number(r.saves) || 0,
+      save_seconds: Number(r.save_seconds) || 0,
       save_pay: Math.round(Number(r.chain_pay) || 0),
     }))
-    .filter((r) => r.save_pay > 0 || r.saves > 0)
+    .filter((r) => r.save_pay > 0 || r.saves > 0 || r.save_seconds > 0)
     .sort((a, b) => b.save_pay - a.save_pay || b.saves - a.saves);
 
   return NextResponse.json({

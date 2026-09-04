@@ -282,14 +282,25 @@ export function LiveChain({ initial, myId }: { initial: StatePayload; myId: numb
                 <span className="font-medium">
                   {m.name}
                   {m.id === myId && <span className="ml-1.5 text-xs text-emerald-500">(you)</span>}
-                  {m.location && (
+                  {m.location && m.unavailable_state !== "Traveling" && (
                     <span className="ml-2 text-xs font-normal text-neutral-500">📍 {m.location}</span>
                   )}
                   {m.unavailable_state && (
                     <span className="ml-2 rounded bg-amber-900/60 px-1.5 py-0.5 text-xs font-semibold text-amber-300">
-                      {m.unavailable_state === "Traveling"
-                        ? "✈ flying — can't save"
-                        : `${m.unavailable_state} — can't save`}
+                      {m.unavailable_state === "Traveling" ? (
+                        <>
+                          {m.travel_dest
+                            ? m.travel_dest === "Torn"
+                              ? "✈ returning to Torn"
+                              : `✈ → ${m.travel_dest}`
+                            : "✈ flying"}
+                          {m.travel_started_at !== null &&
+                            ` · since ${fmtTimeOfDay(m.travel_started_at)}`}
+                          {" — can't save"}
+                        </>
+                      ) : (
+                        `${m.unavailable_state} — can't save`
+                      )}
                     </span>
                   )}
                 </span>
@@ -326,6 +337,12 @@ export function LiveChain({ initial, myId }: { initial: StatePayload; myId: numb
       )}
     </div>
   );
+}
+
+// Wall-clock hour:minute in the viewer's local timezone, from a unix-seconds
+// timestamp — used for "since 14:32" on a flying saver's departure.
+function fmtTimeOfDay(s: number): string {
+  return new Date(s * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
 // Optional, low-key "I'm here" — copies a ready-to-paste note for faction chat.

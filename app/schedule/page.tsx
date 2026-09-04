@@ -1,16 +1,8 @@
 import { redirect } from "next/navigation";
-import { sessionMember } from "@/lib/session";
-import { SchedulePanel } from "./SchedulePanel";
-import { Nav } from "../Nav";
 
+// The Schedule feature is currently disabled. The route, its API, and the
+// availability data are all left intact — re-enable by restoring the panel
+// render below and the "Schedule" tab in Nav.tsx.
 export default async function SchedulePage() {
-  const member = await sessionMember();
-  if (!member) redirect("/login");
-
-  return (
-    <main className="mx-auto max-w-3xl px-4 py-6">
-      <Nav current="schedule" isAdmin={member.is_admin} name={member.name} />
-      <SchedulePanel myId={member.torn_id} />
-    </main>
-  );
+  redirect("/");
 }

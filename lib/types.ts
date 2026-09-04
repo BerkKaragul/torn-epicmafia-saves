@@ -46,6 +46,10 @@ export interface ShiftRow {
   abroad: boolean;
   /** Country the saver is currently in (null = home / not abroad). */
   location: string | null;
+  /** Where a flying saver is headed ("Torn" = returning home); null unless traveling. */
+  travel_dest: string | null;
+  /** When the poller first saw them enter Traveling (≈ departure); null unless traveling. */
+  travel_started_at: string | null;
   /** Set when the saver taps "skip my turn" — pushes them to the back. */
   deprioritized_at: string | null;
   payout_line_id: string | null;

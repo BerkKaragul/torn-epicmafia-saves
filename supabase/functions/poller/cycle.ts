@@ -35,6 +35,8 @@ interface ActiveShiftRow {
   unavailable_state: string | null;
   abroad: boolean;
   location: string | null;
+  travel_dest: string | null;
+  travel_started_at: string | null;
   deprioritized_at: string | null;
   hourly_rate_snapshot: number | string;
   members: MemberKeyRow;
@@ -117,6 +119,22 @@ function parseCountry(state: string, description: string | undefined): string | 
   return null;
 }
 
+/**
+ * Where a flying saver is HEADED (direction-aware), for display. Unlike
+ * parseCountry (which just names the foreign country), this keeps the direction:
+ *   "Traveling to Switzerland"        -> "Switzerland"  (outbound)
+ *   "Returning to Torn from Switzerland" -> "Torn"      (heading home)
+ * Only meaningful while state === "Traveling"; null otherwise.
+ */
+function parseTravelDest(description: string | undefined): string | null {
+  if (!description) return null;
+  const d = description.trim();
+  const out = d.match(/^Traveling to (.+)$/i);
+  if (out) return out[1];
+  if (/^Returning to Torn from /i.test(d)) return "Torn";
+  return null;
+}
+
 export async function runPollCycle(): Promise<void> {
   const db = sb();
   const nowS = Math.floor(Date.now() / 1000);
@@ -179,7 +197,7 @@ export async function runPollCycle(): Promise<void> {
     const { data: activeShiftsRaw } = await db
       .from("shifts")
       .select(
-        `id, member_id, started_at, planned_minutes, last_save_at, unavailable_state, abroad, location, deprioritized_at, hourly_rate_snapshot, members!inner(${MEMBER_KEY_COLS})`,
+        `id, member_id, started_at, planned_minutes, last_save_at, unavailable_state, abroad, location, travel_dest, travel_started_at, deprioritized_at, hourly_rate_snapshot, members!inner(${MEMBER_KEY_COLS})`,
       )
       .is("ended_at", null)
       .returns<ActiveShiftRow[]>();
@@ -1026,6 +1044,27 @@ async function syncAvailability(
     if (country !== shift.location) {
       await db.from("shifts").update({ location: country }).eq("id", shift.id);
       shift.location = country;
+    }
+
+    // For flying savers, show where they're headed and (roughly) when they took
+    // off. Torn's status only gives arrival time, so departure = the first poll
+    // that saw them Traveling. We check the OLD unavailable_state here (it's
+    // updated further down), so the timestamp is kept while they stay in the air
+    // and cleared once they land.
+    const traveling = state === "Traveling";
+    const travelDest = traveling ? parseTravelDest(status?.description) : null;
+    const travelStartedAt = traveling
+      ? shift.unavailable_state === "Traveling" && shift.travel_started_at
+        ? shift.travel_started_at
+        : nowIso
+      : null;
+    if (travelDest !== shift.travel_dest || travelStartedAt !== shift.travel_started_at) {
+      await db
+        .from("shifts")
+        .update({ travel_dest: travelDest, travel_started_at: travelStartedAt })
+        .eq("id", shift.id);
+      shift.travel_dest = travelDest;
+      shift.travel_started_at = travelStartedAt;
     }
 
     // Hourly pay only accrues while a saver is abroad (saves are done in another

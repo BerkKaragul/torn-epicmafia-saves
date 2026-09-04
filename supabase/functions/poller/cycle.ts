@@ -105,16 +105,21 @@ function normalizeRemainingS(raw: number, nowS: number): number {
  * status description. Null while home (Okay) or blocked (hospital/jail); those
  * states are already surfaced via unavailable_state.
  */
-function parseCountry(state: string, description: string | undefined): string | null {
-  if (!description) return null;
-  const d = description.trim();
-  if (state === "Traveling") {
-    const m = d.match(/^(?:Traveling to|Returning to Torn from) (.+)$/i);
-    return m ? m[1] : null;
-  }
-  if (state === "Abroad") {
-    const m = d.match(/^In (.+)$/i);
-    return m ? m[1] : null;
+function parseCountry(
+  state: string,
+  description: string | undefined,
+  details?: string | null,
+): string | null {
+  for (const raw of [description, details]) {
+    if (!raw) continue;
+    const d = raw.trim();
+    if (state === "Traveling") {
+      const m = d.match(/^(?:Traveling to|Returning to Torn from) (.+)$/i);
+      if (m) return m[1];
+    } else if (state === "Abroad") {
+      const m = d.match(/^In (.+)$/i);
+      if (m) return m[1];
+    }
   }
   return null;
 }
@@ -122,16 +127,24 @@ function parseCountry(state: string, description: string | undefined): string | 
 /**
  * Where a flying saver is HEADED (direction-aware), for display. Unlike
  * parseCountry (which just names the foreign country), this keeps the direction:
- *   "Traveling to Switzerland"        -> "Switzerland"  (outbound)
- *   "Returning to Torn from Switzerland" -> "Torn"      (heading home)
- * Only meaningful while state === "Traveling"; null otherwise.
+ *   "Traveling to Switzerland"           -> "Switzerland"  (outbound)
+ *   "Returning to Torn [from Switzerland]" -> "Torn"       (heading home)
+ * Torn splits this text across `description` and `details` depending on the
+ * endpoint, so we scan both. Only meaningful while state === "Traveling".
  */
-function parseTravelDest(description: string | undefined): string | null {
-  if (!description) return null;
-  const d = description.trim();
-  const out = d.match(/^Traveling to (.+)$/i);
-  if (out) return out[1];
-  if (/^Returning to Torn from /i.test(d)) return "Torn";
+function parseTravelDest(
+  description?: string | null,
+  details?: string | null,
+): string | null {
+  for (const raw of [description, details]) {
+    if (!raw) continue;
+    const d = raw.trim();
+    const out = d.match(/^Traveling to (.+)$/i);
+    if (out) return out[1];
+    if (/^Returning to Torn\b/i.test(d)) return "Torn";
+    const inX = d.match(/^In (.+)$/i); // some responses read "In X" mid-flight
+    if (inX) return inX[1];
+  }
   return null;
 }
 
@@ -1040,7 +1053,7 @@ async function syncAvailability(
     const state = status?.state ?? "Okay";
 
     // country shown next to the saver's name (null = home / not abroad)
-    const country = parseCountry(state, status?.description);
+    const country = parseCountry(state, status?.description, status?.details);
     if (country !== shift.location) {
       await db.from("shifts").update({ location: country }).eq("id", shift.id);
       shift.location = country;
@@ -1052,7 +1065,14 @@ async function syncAvailability(
     // updated further down), so the timestamp is kept while they stay in the air
     // and cleared once they land.
     const traveling = state === "Traveling";
-    const travelDest = traveling ? parseTravelDest(status?.description) : null;
+    const travelDest = traveling
+      ? parseTravelDest(status?.description, status?.details)
+      : null;
+    // TEMP diagnostic: if we can't read a destination for a flying saver, log the
+    // raw status so we can see Torn's actual shape. Remove once confirmed.
+    if (traveling && !travelDest) {
+      console.warn("[travel-unparsed]", shift.member_id, JSON.stringify(status));
+    }
     const travelStartedAt = traveling
       ? shift.unavailable_state === "Traveling" && shift.travel_started_at
         ? shift.travel_started_at

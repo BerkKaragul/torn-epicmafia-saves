@@ -33,7 +33,13 @@ export interface TornFactionMember {
   days_in_faction: number;
   position: string;
   last_action: { status: string; timestamp: number; relative: string };
-  status: { description: string; state: string; color: string; until: number | null };
+  status: {
+    description: string;
+    details?: string | null;
+    state: string;
+    color: string;
+    until: number | null;
+  };
 }
 
 export interface TornAttackParty {

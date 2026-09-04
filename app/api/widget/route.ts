@@ -18,7 +18,7 @@ const toS = (iso: string) => Math.floor(Date.parse(iso) / 1000);
 // emergency kill floor; installs below it are asked to update and stop.
 // Keep `min` well below any live version so nobody is disabled by accident —
 // bump it ONLY to deliberately force-retire an old version.
-const LATEST_WIDGET_VERSION = "1.9.0";
+const LATEST_WIDGET_VERSION = "1.10.0";
 const MIN_WIDGET_VERSION = "1.0.0";
 
 // Every faction member's userscript polls this from every open Torn tab (and

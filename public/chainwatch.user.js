@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChainWatch Saver Widget
 // @namespace    chainwatch.epicmafia
-// @version      1.9.0
+// @version      1.10.0
 // @description  Shows the current & next chain saver (and timer) from ChainWatch, inside Torn — with the same danger siren as the site (one tab plays, not all).
 // @author       EPIC Mafia
 // @license      MIT
@@ -35,8 +35,8 @@
   // fast tremolo. `critical` (chain about to die) is faster, higher and louder.
   let audioCtx = null;
   let sirenVol = GM_getValue("cw_vol", 1); // per-device siren loudness, 0–1
-  let onlyDuty = GM_getValue("cw_onlyduty", false); // only alarm while I'm a saver
-  let myName = GM_getValue("cw_myname", ""); // my Torn name, for the saver check
+  let onlyDuty = GM_getValue("cw_onlyduty", false); // only alarm when it's my turn
+  let myName = GM_getValue("cw_myname", ""); // my Torn name, matched to the turn-holder
 
   function audio() {
     try {
@@ -509,13 +509,13 @@
       box.style.boxShadow = "0 4px 14px rgba(0,0,0,.5)";
     }
 
-    // "only when I'm saving" mutes the sound (not the visuals) unless my name is
-    // on the on-duty roster; with no name set yet, never mute (don't silently
-    // miss an alarm)
-    const names = (data && data.on_duty_names) || [];
-    const iAmSaver =
-      !!myName && names.some((n) => n && n.toLowerCase() === myName.toLowerCase());
-    const sirenMuted = onlyDuty && !!myName && !iAmSaver;
+    // "only when I'm saving" mutes the sound (not the visuals) unless it's
+    // actually MY turn to save — i.e. I'm the current turn-holder, not merely
+    // enlisted behind someone else. Matches the site. With no name set yet,
+    // never mute (don't silently miss an alarm).
+    const isMyTurn =
+      !!myName && !!data.turn && data.turn.toLowerCase() === myName.toLowerCase();
+    const sirenMuted = onlyDuty && !!myName && !isMyTurn;
 
     // keep the audible alarm in lockstep with the site's logic
     updateSiren(live, danger && !sirenMuted, critical);

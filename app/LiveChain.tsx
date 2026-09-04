@@ -95,7 +95,6 @@ export function LiveChain({ initial, myId }: { initial: StatePayload; myId: numb
   const critical = chainActive && remaining <= Math.round(state.alert_threshold_s / 2);
   const pollerStale = state.poller_at === null || nowS - state.poller_at > 90;
   const myTurn = state.turn_member_id === myId;
-  const iAmSaver = state.on_duty.some((m) => m.id === myId);
 
   // tab title
   useEffect(() => {
@@ -104,13 +103,15 @@ export function LiveChain({ initial, myId }: { initial: StatePayload; myId: numb
       : "ChainWatch — EPIC Mafia";
   }, [chainActive, remaining, state.chain.current]);
 
-  // danger siren (armed by the user toggle — browsers require a gesture)
+  // danger siren (armed by the user toggle — browsers require a gesture).
+  // "only when I'm saving" restricts it to when it's actually MY turn to save
+  // (I'm the rotation head), not merely while I'm enlisted behind someone else.
   useEffect(() => {
-    if (!soundOn || !danger || (onlyWhenDuty && !iAmSaver)) return;
+    if (!soundOn || !danger || (onlyWhenDuty && !myTurn)) return;
     playAlarm(critical);
     const id = setInterval(() => playAlarm(critical), alarmInterval(critical));
     return () => clearInterval(id);
-  }, [soundOn, danger, critical, onlyWhenDuty, iAmSaver]);
+  }, [soundOn, danger, critical, onlyWhenDuty, myTurn]);
 
   return (
     <div className="flex flex-col gap-4">
@@ -221,7 +222,7 @@ export function LiveChain({ initial, myId }: { initial: StatePayload; myId: numb
           </label>
           <label
             className="flex items-center gap-1 text-xs text-neutral-400"
-            title="Only sound the siren while you're on saver duty"
+            title="Only sound the siren when it's your turn to save"
           >
             <input
               type="checkbox"

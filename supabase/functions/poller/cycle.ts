@@ -5,6 +5,7 @@ import { createClient, type SupabaseClient } from "npm:@supabase/supabase-js@2";
 import { detect, type ChainEvent, type ChainObservation } from "../_shared/logic/detect.ts";
 import { rotationOrder, type ShiftLite } from "../_shared/logic/rotation.ts";
 import { perSaverHourlyRate, saveBonus, type SaveBonusMode } from "../_shared/logic/pay.ts";
+import { parseCountry, parseTravelDest } from "../_shared/logic/travel.ts";
 import { decryptApiKey } from "../_shared/lib/crypto.ts";
 import {
   isInvalidKeyError,
@@ -98,55 +99,6 @@ async function backoffMember(db: SupabaseClient, tornId: number): Promise<void> 
 function normalizeRemainingS(raw: number, nowS: number): number {
   if (raw > 1_000_000_000) return Math.max(0, raw - nowS);
   return Math.max(0, raw);
-}
-
-/**
- * The country a saver is currently in, for display — parsed from Torn's member
- * status description. Null while home (Okay) or blocked (hospital/jail); those
- * states are already surfaced via unavailable_state.
- */
-function parseCountry(
-  state: string,
-  description: string | undefined,
-  details?: string | null,
-): string | null {
-  for (const raw of [description, details]) {
-    if (!raw) continue;
-    const d = raw.trim();
-    if (state === "Traveling") {
-      const m = d.match(/^(?:Traveling to|Returning to Torn from) (.+)$/i);
-      if (m) return m[1];
-    } else if (state === "Abroad") {
-      const m = d.match(/^In (.+)$/i);
-      if (m) return m[1];
-    }
-  }
-  return null;
-}
-
-/**
- * Where a flying saver is HEADED (direction-aware), for display. Torn v2's
- * faction/members status phrases travel as "Traveling from X to Y", so the
- * destination is the "to Y" part:
- *   "Traveling from Torn to Switzerland" -> "Switzerland"  (outbound)
- *   "Traveling from Mexico to Torn"      -> "Torn"         (heading home)
- * Older "Traveling to X" / "Returning to Torn" shapes are kept as fallbacks.
- * Only meaningful while state === "Traveling".
- */
-function parseTravelDest(
-  description?: string | null,
-  details?: string | null,
-): string | null {
-  for (const raw of [description, details]) {
-    if (!raw) continue;
-    const d = raw.trim();
-    const fromTo = d.match(/^Traveling from .+? to (.+)$/i);
-    if (fromTo) return fromTo[1];
-    const to = d.match(/^Traveling to (.+)$/i);
-    if (to) return to[1];
-    if (/^Returning to Torn\b/i.test(d)) return "Torn";
-  }
-  return null;
 }
 
 export async function runPollCycle(): Promise<void> {
@@ -1048,6 +1000,7 @@ async function syncAvailability(
   }
   const infoById = new Map(roster.map((m) => [m.id, m.status ?? null]));
   const nowIso = new Date().toISOString();
+  const ended = new Set<string>();
 
   for (const shift of activeShifts) {
     const status = infoById.get(shift.member_id) ?? null;
@@ -1069,6 +1022,31 @@ async function syncAvailability(
     const travelDest = traveling
       ? parseTravelDest(status?.description, status?.details)
       : null;
+
+    // Heading home to Torn = done saving for this trip: end the shift now so the
+    // slot frees up immediately (4/4 -> 3/4) instead of lingering as "can't save".
+    if (traveling && travelDest === "Torn") {
+      await db
+        .from("shifts")
+        .update({ ended_at: nowIso, end_reason: "returning_home" })
+        .eq("id", shift.id)
+        .is("ended_at", null);
+      await db
+        .from("unavailable_periods")
+        .update({ ended_at: nowIso })
+        .eq("member_id", shift.member_id)
+        .is("ended_at", null);
+      await dispatch(db, [shift.member_id], {
+        type: "shift_end",
+        title: "Duty ended — heading home",
+        body: "You're flying back to Torn, so you've been taken off saver duty. Enlist again next time you're abroad.",
+        url: "/duty",
+        dedupKey: `returning_home:${shift.id}`,
+      });
+      ended.add(shift.id);
+      continue;
+    }
+
     const travelStartedAt = traveling
       ? shift.unavailable_state === "Traveling" && shift.travel_started_at
         ? shift.travel_started_at
@@ -1111,7 +1089,7 @@ async function syncAvailability(
     await db.from("shifts").update({ unavailable_state: blocked }).eq("id", shift.id);
     shift.unavailable_state = blocked;
   }
-  return activeShifts;
+  return ended.size ? activeShifts.filter((s) => !ended.has(s.id)) : activeShifts;
 }
 
 /**

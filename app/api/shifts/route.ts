@@ -1,6 +1,9 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import { decryptKey } from "@/lib/crypto";
 import { sessionMember, unauthorized } from "@/lib/session";
+import { tornClient } from "@/lib/torn";
+import { canEnlistFromStatus } from "@/supabase/functions/_shared/logic/travel";
 import { rotationOrder } from "@/supabase/functions/_shared/logic/rotation";
 import type { ShiftRow } from "@/lib/types";
 
@@ -12,6 +15,30 @@ export async function POST(req: Request) {
     return NextResponse.json(
       { error: "Your stored API key stopped working — log in again first." },
       { status: 400 },
+    );
+  }
+
+  // You can only enlist while you can actually go on to save: already abroad, or
+  // flying OUT to another country. Not from Torn (nothing to save at home) and
+  // not on the way back (you're done). Checked live against Torn with your key.
+  try {
+    if (!member.api_key_ct || !member.api_key_iv) throw new Error("no key on file");
+    const key = await decryptKey(member.api_key_ct, member.api_key_iv);
+    const profile = await tornClient(key).userBasic();
+    if (!canEnlistFromStatus(profile.status?.state ?? "Okay", profile.status?.description)) {
+      return NextResponse.json(
+        {
+          error:
+            "You can only go on duty while abroad or flying to another country — not from Torn or on the way back.",
+        },
+        { status: 409 },
+      );
+    }
+  } catch (e) {
+    console.error("enlist status check failed", e);
+    return NextResponse.json(
+      { error: "Couldn't check your travel status just now — try again in a moment." },
+      { status: 503 },
     );
   }
 

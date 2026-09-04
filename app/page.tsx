@@ -3,6 +3,7 @@ import { sessionMember } from "@/lib/session";
 import { buildStatePayload } from "@/lib/state";
 import { LiveChain } from "./LiveChain";
 import { HowItWorks } from "./HowItWorks";
+import { WarStandings } from "./WarStandings";
 import { Nav } from "./Nav";
 
 export const dynamic = "force-dynamic";
@@ -17,6 +18,9 @@ export default async function LivePage() {
       <Nav current="live" isAdmin={member.is_admin} name={member.name} />
       <HowItWorks />
       <LiveChain initial={initial} myId={member.torn_id} />
+      <div className="mt-4">
+        <WarStandings myId={member.torn_id} />
+      </div>
     </main>
   );
 }

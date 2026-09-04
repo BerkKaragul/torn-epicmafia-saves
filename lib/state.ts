@@ -20,6 +20,8 @@ export interface StatePayload {
     last_save_at: number | null;
     unavailable_state: string | null;
     location: string | null;
+    travel_dest: string | null;
+    travel_started_at: number | null;
   }[];
   turn_member_id: number | null;
   last_save: {
@@ -87,6 +89,8 @@ export async function buildStatePayload(): Promise<StatePayload> {
         last_save_at: s.last_save_at ? toS(s.last_save_at) : null,
         unavailable_state: s.unavailable_state,
         location: s.location,
+        travel_dest: s.travel_dest,
+        travel_started_at: s.travel_started_at ? toS(s.travel_started_at) : null,
       };
     }),
     turn_member_id: turnMemberId(lites),

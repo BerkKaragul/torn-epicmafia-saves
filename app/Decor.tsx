@@ -7,9 +7,10 @@ import { useEffect, useState } from "react";
 // entirely). Per-device on/off (localStorage) via a small toggle. If Giphy is
 // unreachable/rate-limited we simply show nothing — never a broken image.
 //
-// Uses Giphy's public beta key by default; set NEXT_PUBLIC_GIPHY_KEY in Vercel
-// for your own (higher, more reliable rate limits).
-const GIPHY_KEY = process.env.NEXT_PUBLIC_GIPHY_KEY || "dc6zaTOxFJmzC";
+// Our Giphy API key (NEXT_PUBLIC keys ship to the browser by design, so this is
+// not a secret — rotate it in the Giphy dashboard if needed). NEXT_PUBLIC_GIPHY_KEY
+// overrides it if set in Vercel.
+const GIPHY_KEY = process.env.NEXT_PUBLIC_GIPHY_KEY || "VDwp85SizZ8obp49Vy4fRNT9Iomxn36t";
 const CORNERS = ["top-2 left-2", "top-2 right-2", "bottom-2 left-2", "bottom-2 right-2"];
 
 interface GiphyItem {

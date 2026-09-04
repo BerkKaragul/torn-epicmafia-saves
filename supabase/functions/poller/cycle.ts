@@ -125,12 +125,13 @@ function parseCountry(
 }
 
 /**
- * Where a flying saver is HEADED (direction-aware), for display. Unlike
- * parseCountry (which just names the foreign country), this keeps the direction:
- *   "Traveling to Switzerland"           -> "Switzerland"  (outbound)
- *   "Returning to Torn [from Switzerland]" -> "Torn"       (heading home)
- * Torn splits this text across `description` and `details` depending on the
- * endpoint, so we scan both. Only meaningful while state === "Traveling".
+ * Where a flying saver is HEADED (direction-aware), for display. Torn v2's
+ * faction/members status phrases travel as "Traveling from X to Y", so the
+ * destination is the "to Y" part:
+ *   "Traveling from Torn to Switzerland" -> "Switzerland"  (outbound)
+ *   "Traveling from Mexico to Torn"      -> "Torn"         (heading home)
+ * Older "Traveling to X" / "Returning to Torn" shapes are kept as fallbacks.
+ * Only meaningful while state === "Traveling".
  */
 function parseTravelDest(
   description?: string | null,
@@ -139,11 +140,11 @@ function parseTravelDest(
   for (const raw of [description, details]) {
     if (!raw) continue;
     const d = raw.trim();
-    const out = d.match(/^Traveling to (.+)$/i);
-    if (out) return out[1];
+    const fromTo = d.match(/^Traveling from .+? to (.+)$/i);
+    if (fromTo) return fromTo[1];
+    const to = d.match(/^Traveling to (.+)$/i);
+    if (to) return to[1];
     if (/^Returning to Torn\b/i.test(d)) return "Torn";
-    const inX = d.match(/^In (.+)$/i); // some responses read "In X" mid-flight
-    if (inX) return inX[1];
   }
   return null;
 }
@@ -1068,11 +1069,6 @@ async function syncAvailability(
     const travelDest = traveling
       ? parseTravelDest(status?.description, status?.details)
       : null;
-    // TEMP diagnostic: if we can't read a destination for a flying saver, log the
-    // raw status so we can see Torn's actual shape. Remove once confirmed.
-    if (traveling && !travelDest) {
-      console.warn("[travel-unparsed]", shift.member_id, JSON.stringify(status));
-    }
     const travelStartedAt = traveling
       ? shift.unavailable_state === "Traveling" && shift.travel_started_at
         ? shift.travel_started_at

@@ -1,0 +1,9 @@
+# Supabase CLI project config. The poller is called by pg_cron via pg_net with
+# an `x-poller-secret` header (see functions/poller/index.ts) — NOT a Supabase
+# JWT — so JWT verification MUST stay off or every cron call gets rejected and
+# the poller silently stops. Pinning it here keeps `supabase functions deploy`
+# from flipping it back to the true default.
+project_id = "betugujkfdblyfnlyikr"
+
+[functions.poller]
+verify_jwt = false

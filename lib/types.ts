@@ -92,6 +92,29 @@ export interface ChainRow {
   max_current: number;
 }
 
+/**
+ * One war's frozen final payout — what the Payouts page shows every member.
+ * `lines` is a WarPayoutRow[] and `config` a WarPayoutConfig (see lib/warPayout).
+ */
+export interface WarPayoutSnapshotRow {
+  torn_war_id: number;
+  config: unknown;
+  totals: {
+    prize: number;
+    sumChain: number;
+    sumRetal: number;
+    distributed: number;
+    grand: number;
+    members: number;
+  };
+  lines: unknown;
+  saved_by: number;
+  saved_at: string;
+}
+
+// The two rows below back the retired period-sweep payout system (0032 dropped
+// its functions). The tables are kept for the historical record of what was
+// already paid, which shifts.payout_line_id / saves.payout_line_id still cite.
 export interface PayoutPeriodRow {
   id: string;
   period_start: string;

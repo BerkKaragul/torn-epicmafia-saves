@@ -2,6 +2,12 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { fmtMoney } from "@/lib/format";
+import {
+  computeWarPayout,
+  DEFAULT_CONFIG,
+  type WarPayoutConfig,
+  type WarReportRow,
+} from "@/lib/warPayout";
 
 interface War {
   torn_war_id: number;
@@ -10,48 +16,12 @@ interface War {
   ended_at: string | null;
 }
 
-interface ReportRow {
-  member_id: number;
-  name: string;
-  respect: number;
-  war_hits: number;
-  outside_hits: number;
-  retaliations: number;
-  assists: number;
-  saves: number;
-  save_seconds: number;
-  chain_pay: number;
+/** What the API reports back about an already-frozen payout for this war. */
+interface SavedPayout {
+  saved_at: string;
+  totals: { grand: number; members: number };
+  members: { name: string } | null;
 }
-
-interface Config {
-  pool: number;
-  retalFixed: number;
-  // respect pool gets respectPct% of the leftover, the hit pool the rest
-  respectPct: number;
-  // saves/assists draw from BOTH pools: a hit factor (fictional hits in the hit
-  // pool) and a score factor (fictional respect, in average-hit units, in the
-  // respect pool) — each tunable on its own
-  saveAsHits: number;
-  assistAsHits: number;
-  saveScore: number;
-  assistScore: number;
-  // outside hits are normally NOT paid; when the admin opts in they count as
-  // fictional hits in the hit pool
-  includeOutside: boolean;
-  outsideAsHits: number;
-}
-
-const DEFAULT: Config = {
-  pool: 0,
-  retalFixed: 900_000,
-  respectPct: 75,
-  saveAsHits: 1,
-  assistAsHits: 1,
-  saveScore: 1,
-  assistScore: 1,
-  includeOutside: false,
-  outsideAsHits: 1,
-};
 
 const fmtDate = (iso: string) =>
   new Date(iso).toLocaleDateString(undefined, { dateStyle: "medium" });
@@ -60,20 +30,23 @@ const fmtNum = (n: number) => Number(n).toLocaleString(undefined, { maximumFract
 export function WarPayoutPanel() {
   const [wars, setWars] = useState<War[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
-  const [report, setReport] = useState<ReportRow[]>([]);
-  const [config, setConfig] = useState<Config>(DEFAULT);
-  const [savedConfig, setSavedConfig] = useState<Config>(DEFAULT);
+  const [report, setReport] = useState<WarReportRow[]>([]);
+  const [config, setConfig] = useState<WarPayoutConfig>(DEFAULT_CONFIG);
+  const [savedConfig, setSavedConfig] = useState<WarPayoutConfig>(DEFAULT_CONFIG);
   const [msg, setMsg] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [retalMsg, setRetalMsg] = useState<string | null>(null);
   const [retalBusy, setRetalBusy] = useState(false);
   const [pendingChains, setPendingChains] = useState(0);
+  const [saved, setSaved] = useState<SavedPayout | null>(null);
+  const [freezeBusy, setFreezeBusy] = useState(false);
+  const [freezeMsg, setFreezeMsg] = useState<string | null>(null);
 
   useEffect(() => {
     fetch("/api/admin/war-payout")
       .then((r) => r.json())
       .then((b) => {
-        const cfg = { ...DEFAULT, ...(b.config ?? {}) };
+        const cfg = { ...DEFAULT_CONFIG, ...(b.config ?? {}) };
         setConfig(cfg);
         setSavedConfig(cfg);
         setWars(b.wars ?? []);
@@ -83,10 +56,12 @@ export function WarPayoutPanel() {
 
   const loadReport = useCallback(async (warId: string) => {
     setLoading(true);
+    setFreezeMsg(null);
     try {
       const b = await fetch(`/api/admin/war-payout?war_id=${warId}`).then((r) => r.json());
       setReport(b.report ?? []);
       setPendingChains(b.pending_chains ?? 0);
+      setSaved(b.saved ?? null);
     } finally {
       setLoading(false);
     }
@@ -122,99 +97,18 @@ export function WarPayoutPanel() {
     if (selected) loadReport(selected);
   }, [selected, loadReport]);
 
-  const setNum = (k: keyof Config) => (v: string) =>
+  const setNum = (k: keyof WarPayoutConfig) => (v: string) =>
     setConfig((c) => ({ ...c, [k]: v === "" ? 0 : Number(v) }));
 
-  // Each member's total = chain-hour pay + retal pay (fixed each) + a share of
-  // what's left of the prize. A respect pool (respectPct%) is shared by respect
-  // and a hit pool (the rest) by war hits, with saves/assists as fictional hits.
-  // Each pool is normalised within itself; empty pools are dropped so nothing is
-  // lost. Largest-remainder keeps the integer shares summing exactly to what was
-  // actually distributed.
-  const { rows, sumChain, sumRetal, distributed, prize, respectPerUnit, hitPerUnit } = useMemo(() => {
-    const prize = Math.max(0, Math.round(config.pool));
-    const retalFixed = Math.max(0, config.retalFixed);
+  // Live preview of exactly the maths the server will redo when the numbers are
+  // frozen — same module, so what you see is what gets published.
+  const { rows, sumChain, sumRetal, distributed, prize, respectPerUnit, hitPerUnit, overspent } =
+    useMemo(() => computeWarPayout(report, config), [report, config]);
 
-    const base = report.map((r) => ({
-      member_id: r.member_id,
-      name: r.name,
-      respect: Number(r.respect),
-      war_hits: Number(r.war_hits),
-      outside_hits: Number(r.outside_hits),
-      retaliations: Number(r.retaliations),
-      assists: Number(r.assists),
-      saves: Number(r.saves),
-      chainPay: Math.round(Number(r.chain_pay)),
-      retalPay: Math.round(Number(r.retaliations) * retalFixed),
-    }));
-
-    const sumChain = base.reduce((s, r) => s + r.chainPay, 0);
-    const sumRetal = base.reduce((s, r) => s + r.retalPay, 0);
-    const distributable = Math.max(0, prize - sumChain - sumRetal);
-
-    // Two category pools of the leftover: a respect pool (respectPct%) and a hit
-    // pool (the rest). Saves and assists draw from BOTH — each is a fictional war
-    // hit: it counts as N hits in the hit pool, and carries a fictional respect
-    // score (N × the respect an average war hit earned) in the respect pool.
-    // Outside hits are only in the hit pool, and only when the admin opts in.
-    const pct = Math.min(100, Math.max(0, config.respectPct));
-    const totalRespect = base.reduce((s, r) => s + r.respect, 0);
-    const totalHits = base.reduce((s, r) => s + r.war_hits, 0);
-    const respectPerHit = totalHits > 0 ? totalRespect / totalHits : 0;
-    // hit factor → hit pool; score factor → respect pool (in avg-hit respect)
-    const ficHits = (r: (typeof base)[number]) =>
-      config.saveAsHits * r.saves +
-      config.assistAsHits * r.assists +
-      (config.includeOutside ? config.outsideAsHits * r.outside_hits : 0);
-    const ficRespect = (r: (typeof base)[number]) =>
-      respectPerHit * (config.saveScore * r.saves + config.assistScore * r.assists);
-    const categories: { key: string; w: number; vals: number[] }[] = [
-      { key: "respect", w: pct, vals: base.map((r) => r.respect + ficRespect(r)) },
-      { key: "hit", w: 100 - pct, vals: base.map((r) => r.war_hits + ficHits(r)) },
-    ];
-
-    // only categories with a positive weight AND something to divide take a cut
-    const active = categories
-      .map((c) => ({ ...c, total: c.vals.reduce((a, b) => a + b, 0) }))
-      .filter((c) => c.w > 0 && c.total > 0);
-    const wTotal = active.reduce((s, c) => s + c.w, 0);
-
-    const shares = base.map(() => 0);
-    let respectPerUnit = 0;
-    let hitPerUnit = 0;
-    if (wTotal > 0) {
-      for (const c of active) {
-        const catPool = (c.w / wTotal) * distributable;
-        const perUnit = c.total > 0 ? catPool / c.total : 0;
-        if (c.key === "respect") respectPerUnit = perUnit;
-        if (c.key === "hit") hitPerUnit = perUnit;
-        base.forEach((_, i) => {
-          shares[i] += (c.vals[i] / c.total) * catPool;
-        });
-      }
-    }
-
-    // largest-remainder rounding to the integer total we actually distributed
-    const targetInt = Math.round(shares.reduce((a, b) => a + b, 0));
-    const floors = shares.map(Math.floor);
-    const left = targetInt - floors.reduce((a, b) => a + b, 0);
-    const order = shares
-      .map((s, i) => ({ i, frac: s - Math.floor(s) }))
-      .sort((a, b) => b.frac - a.frac);
-    const shareInt = floors.slice();
-    for (let j = 0; j < left && order.length > 0; j++) shareInt[order[j % order.length].i] += 1;
-
-    const rows = base
-      .map((r, i) => ({ ...r, share: shareInt[i], total: r.chainPay + r.retalPay + shareInt[i] }))
-      .filter((r) => r.total > 0)
-      .sort((a, b) => b.total - a.total);
-
-    const distributed = shareInt.reduce((a, b) => a + b, 0);
-    return { rows, sumChain, sumRetal, distributed, prize, respectPerUnit, hitPerUnit };
-  }, [report, config]);
-
-  const overspent = prize > 0 && sumChain + sumRetal > prize;
   const dirty = JSON.stringify(config) !== JSON.stringify(savedConfig);
+  const war = wars.find((w) => String(w.torn_war_id) === selected);
+  const isAllTime = selected === "all";
+  const warRunning = Boolean(war && !war.ended_at);
 
   async function saveDefaults() {
     setMsg(null);
@@ -230,8 +124,40 @@ export function WarPayoutPanel() {
     } else setMsg(b.error);
   }
 
+  // The final act: publish these numbers to /payouts for the whole faction.
+  async function freezePayout() {
+    if (!selected || isAllTime) return;
+    const name = war ? `vs ${war.opponent_name}` : `war ${selected}`;
+    const warning = saved
+      ? `${name} already has final data saved (${fmtMoney(saved.totals.grand)}, ${fmtDate(saved.saved_at)}).\n\nReplace it with what's on screen now?`
+      : `Lock in ${fmtMoney(sumChain + sumRetal + distributed)} across ${rows.length} member(s) as the FINAL payout for ${name}?\n\nIt becomes visible to every member on the Payouts page.`;
+    if (!confirm(warning)) return;
+
+    setFreezeBusy(true);
+    setFreezeMsg(null);
+    try {
+      const res = await fetch("/api/admin/war-payout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ war_id: Number(selected), config }),
+      });
+      const b = await res.json();
+      if (res.ok) {
+        setFreezeMsg(
+          `Published — ${fmtMoney(b.grand)} across ${b.members} member(s) is now on the Payouts page.`,
+        );
+        await loadReport(selected);
+      } else {
+        setFreezeMsg(b.error || "Could not save.");
+      }
+    } catch {
+      setFreezeMsg("Request failed.");
+    } finally {
+      setFreezeBusy(false);
+    }
+  }
+
   function exportCsv() {
-    const war = wars.find((w) => String(w.torn_war_id) === selected);
     const tag = war ? war.opponent_name.replace(/[^a-z0-9]+/gi, "-") : "all";
     const lines = [
       "member,respect,war_hits,retals,saves,assists,chain_pay,retal_pay,war_share,total",
@@ -259,7 +185,7 @@ export function WarPayoutPanel() {
     URL.revokeObjectURL(url);
   }
 
-  const numInput = (label: string, k: keyof Config, step: number, hint?: string) => (
+  const numInput = (label: string, k: keyof WarPayoutConfig, step: number, hint?: string) => (
     <label className="text-sm">
       <span className="text-neutral-400">{label}</span>
       <input
@@ -314,7 +240,7 @@ export function WarPayoutPanel() {
             <span className="text-neutral-400">Retals</span>
             <button
               onClick={fetchRetals}
-              disabled={retalBusy || !selected || selected === "all"}
+              disabled={retalBusy || !selected || isAllTime}
               title="Count every war retal (chain + non-chain) from faction attacks — needs faction API access on your key"
               className="mt-1 rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 font-semibold text-neutral-200 hover:bg-neutral-800 disabled:opacity-40"
             >
@@ -467,6 +393,65 @@ export function WarPayoutPanel() {
             </table>
           </div>
         )}
+      </section>
+
+      {/* ── the commit step ─────────────────────────────────────────────── */}
+      <section className="rounded-xl border border-emerald-900/70 bg-emerald-950/20 p-5">
+        <h3 className="font-bold text-emerald-200">Lock in the final data</h3>
+        <p className="mt-1 text-xs text-neutral-400">
+          Everything above is live — it moves as chains sync and weights change. Pressing this
+          freezes the numbers exactly as shown and publishes them to the{" "}
+          <a href="/payouts" className="underline hover:text-neutral-200">
+            Payouts page
+          </a>
+          , where every member can read their line and download the PDF. Do it once the war is
+          over, the retals are fetched, and the figures are settled.
+        </p>
+
+        {saved && (
+          <p className="mt-3 rounded-md border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm text-neutral-300">
+            Already published: {fmtMoney(saved.totals.grand)} across {saved.totals.members}{" "}
+            member(s), locked {fmtDate(saved.saved_at)}
+            {saved.members?.name ? ` by ${saved.members.name}` : ""}. Saving again replaces it.
+          </p>
+        )}
+
+        {warRunning && (
+          <p className="mt-3 text-sm text-amber-400">
+            ⚠ This war is still running — the report will keep changing after you publish.
+          </p>
+        )}
+        {pendingChains > 0 && (
+          <p className="mt-2 text-sm text-amber-400">
+            ⚠ {pendingChains} chain report{pendingChains > 1 ? "s" : ""} still pending — respect may
+            be inflated. Better to wait.
+          </p>
+        )}
+
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          <button
+            onClick={freezePayout}
+            disabled={freezeBusy || isAllTime || rows.length === 0 || config.pool <= 0}
+            title={
+              isAllTime
+                ? "Pick a specific war — “all time” isn't a war payout"
+                : "Publish these numbers as this war's final payout"
+            }
+            className="rounded-md bg-emerald-600 px-4 py-2 text-sm font-bold text-white hover:bg-emerald-500 disabled:opacity-40"
+          >
+            {freezeBusy
+              ? "Saving…"
+              : saved
+                ? "💾 Replace saved war data"
+                : "💾 Save as this war's final data"}
+          </button>
+          {isAllTime && (
+            <span className="text-sm text-neutral-500">
+              Pick a specific war above to publish a payout.
+            </span>
+          )}
+          {freezeMsg && <span className="text-sm text-emerald-300">{freezeMsg}</span>}
+        </div>
       </section>
     </div>
   );

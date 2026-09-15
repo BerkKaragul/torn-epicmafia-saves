@@ -153,6 +153,10 @@ export async function POST(req: Request) {
           distributed: payout.distributed,
           grand,
           members: payout.rows.length,
+          // the rates the split worked out to — frozen alongside the totals so a
+          // member can check their own share against them later
+          respectPerUnit: Math.round(payout.respectPerUnit),
+          hitPerUnit: Math.round(payout.hitPerUnit),
         },
         lines: payout.rows,
         saved_by: admin.torn_id,

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { downloadCsv } from "@/lib/download";
 import { fmtMoney } from "@/lib/format";
 import {
   computeWarPayout,
@@ -176,13 +177,7 @@ export function WarPayoutPanel() {
         ].join(","),
       ),
     ];
-    const blob = new Blob([lines.join("\n")], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `war-payout-${tag}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+    downloadCsv(lines, `war-payout-${tag}.csv`);
   }
 
   const numInput = (label: string, k: keyof WarPayoutConfig, step: number, hint?: string) => (

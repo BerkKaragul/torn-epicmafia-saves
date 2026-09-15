@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { fmtMoney } from "@/lib/format";
-import { downloadPayoutPdf, type PayoutTotals } from "@/lib/payoutPdf";
+import { downloadCsv } from "@/lib/download";
+import { downloadPayoutPdf, unitRateLine, type PayoutTotals } from "@/lib/payoutPdf";
 import { normalizeConfig, type WarPayoutRow } from "@/lib/warPayout";
 
 interface SavedPayout {
@@ -29,6 +30,12 @@ const fmtNum = (n: number) => Number(n).toLocaleString(undefined, { maximumFract
 export function PayoutsArchive({ meId, isAdmin }: { meId: number; isAdmin: boolean }) {
   const [payouts, setPayouts] = useState<SavedPayout[] | null>(null);
   const [open, setOpen] = useState<number | null>(null);
+  // Building a PDF pulls ~400KB of jsPDF over the wire and then lays out every
+  // member. On a phone that is not instant, and a button that looks inert is a
+  // button people press five times — so say what's happening, and say it loudly
+  // if it fails.
+  const [pdfBusy, setPdfBusy] = useState<number | null>(null);
+  const [pdfError, setPdfError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     const res = await fetch("/api/payouts");
@@ -71,27 +78,30 @@ export function PayoutsArchive({ meId, isAdmin }: { meId: number; isAdmin: boole
         ].join(","),
       ),
     ];
-    const url = URL.createObjectURL(new Blob([rows.join("\n")], { type: "text/csv" }));
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `war-payout-${tag}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+    downloadCsv(rows, `war-payout-${tag}.csv`);
   }
 
-  function exportPdf(p: SavedPayout) {
-    downloadPayoutPdf({
-      opponent: p.wars?.opponent_name ?? `War ${p.torn_war_id}`,
-      startedAt: p.wars?.started_at ?? null,
-      endedAt: p.wars?.ended_at ?? null,
-      ourScore: p.wars?.our_score,
-      theirScore: p.wars?.their_score,
-      savedAt: p.saved_at,
-      savedByName: p.members?.name ?? null,
-      totals: p.totals,
-      lines: p.lines,
-      config: normalizeConfig(p.config),
-    });
+  async function exportPdf(p: SavedPayout) {
+    setPdfError(null);
+    setPdfBusy(p.torn_war_id);
+    try {
+      await downloadPayoutPdf({
+        opponent: p.wars?.opponent_name ?? `War ${p.torn_war_id}`,
+        startedAt: p.wars?.started_at ?? null,
+        endedAt: p.wars?.ended_at ?? null,
+        ourScore: p.wars?.our_score,
+        theirScore: p.wars?.their_score,
+        savedAt: p.saved_at,
+        savedByName: p.members?.name ?? null,
+        totals: p.totals,
+        lines: p.lines,
+        config: normalizeConfig(p.config),
+      });
+    } catch {
+      setPdfError("Couldn't build the PDF on this device — the CSV still works.");
+    } finally {
+      setPdfBusy(null);
+    }
   }
 
   if (payouts === null) {
@@ -155,16 +165,19 @@ export function PayoutsArchive({ meId, isAdmin }: { meId: number; isAdmin: boole
                 </span>
               )}
 
+              {/* min-h-11 = 44px, the smallest thing a thumb reliably hits; the
+                  sm: overrides keep the desktop header as compact as it was */}
               <div className="ml-auto flex items-center gap-2">
                 <button
                   onClick={() => exportPdf(p)}
-                  className="rounded-md border border-neutral-700 px-3 py-1.5 text-xs font-semibold text-neutral-300 hover:bg-neutral-800"
+                  disabled={pdfBusy !== null}
+                  className="min-h-11 rounded-md border border-neutral-700 px-4 text-xs font-semibold text-neutral-300 hover:bg-neutral-800 disabled:opacity-50 sm:min-h-0 sm:px-3 sm:py-1.5"
                 >
-                  ⬇ PDF
+                  {pdfBusy === p.torn_war_id ? "Building…" : "⬇ PDF"}
                 </button>
                 <button
                   onClick={() => exportCsv(p)}
-                  className="rounded-md border border-neutral-700 px-2.5 py-1.5 text-xs font-semibold text-neutral-400 hover:bg-neutral-800"
+                  className="min-h-11 rounded-md border border-neutral-700 px-4 text-xs font-semibold text-neutral-400 hover:bg-neutral-800 sm:min-h-0 sm:px-2.5 sm:py-1.5"
                 >
                   CSV
                 </button>
@@ -172,13 +185,19 @@ export function PayoutsArchive({ meId, isAdmin }: { meId: number; isAdmin: boole
                   <button
                     onClick={() => removePayout(p)}
                     title="Unpublish this payout"
-                    className="rounded-md border border-neutral-800 px-2.5 py-1.5 text-xs font-semibold text-neutral-600 hover:border-red-900 hover:text-red-400"
+                    className="ml-2 min-h-11 rounded-md border border-neutral-800 px-3 text-xs font-semibold text-neutral-600 hover:border-red-900 hover:text-red-400 sm:ml-0 sm:min-h-0 sm:px-2.5 sm:py-1.5"
                   >
                     ✕
                   </button>
                 )}
               </div>
             </div>
+
+            {pdfError && pdfBusy === null && (
+              <p className="border-t border-amber-700 bg-amber-950/40 px-5 py-2 text-sm text-amber-300">
+                {pdfError}
+              </p>
+            )}
 
             {isOpen && (
               <div className="border-t border-neutral-800 px-5 pb-5 pt-4">
@@ -188,6 +207,11 @@ export function PayoutsArchive({ meId, isAdmin }: { meId: number; isAdmin: boole
                   {fmtDate(p.saved_at)}
                   {p.members?.name ? ` by ${p.members.name}` : ""}
                 </p>
+                {unitRateLine(p.totals) && (
+                  <p className="mt-1 text-xs text-sky-300">
+                    ≈ {unitRateLine(p.totals)} — what the split paid per unit
+                  </p>
+                )}
                 <div className="mt-3 overflow-x-auto">
                   <table className="w-full text-left text-sm">
                     <thead className="text-xs uppercase text-neutral-500">

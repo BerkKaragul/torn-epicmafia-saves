@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { ThemeToggle } from "./ThemeToggle";
 
 export function Nav({
   current,
@@ -18,7 +19,7 @@ export function Nav({
       href={href}
       className={`rounded-md px-3 py-1.5 text-sm font-medium transition ${
         current === key
-          ? "bg-neutral-800 text-white"
+          ? "bg-neutral-800 text-neutral-50"
           : "text-neutral-400 hover:bg-neutral-900 hover:text-neutral-200"
       }`}
     >
@@ -40,6 +41,7 @@ export function Nav({
       {isAdmin && tab("war-payout", "/admin/war-payout", "War pay")}
       {tab("payouts", "/payouts", "Payouts")}
       <div className="ml-auto flex items-center gap-3 text-sm text-neutral-500">
+        <ThemeToggle />
         <a
           href="https://greasyfork.org/en/scripts/589168-chainwatch-saver-widget"
           target="_blank"

@@ -1,7 +1,90 @@
 @import "tailwindcss";
 
+/* ── theming ──────────────────────────────────────────────────────────────
+   The app is written in dark-mode colours (bg-neutral-900 cards, text-neutral-400
+   hints, bright emerald/amber accents) and that stays the baseline: every
+   utility below resolves to its stock Tailwind value unless <html> carries the
+   .light class. Light mode then re-points the SAME palette variables, so no
+   component needs a `dark:` twin and pages that were never touched — login,
+   duty, admin — flip along with the rest.
+
+   Each ramp is remapped on its own, because a shade means different things in
+   different ramps. Reading the dark design, two bands emerge:
+
+     100–600  text and solid, white-labelled buttons
+     700–950  surfaces, tints and borders
+
+   So the low band becomes DARK ink on light paper, and the high band becomes
+   LIGHT tints. Where a ramp breaks that rule it's called out inline. */
+
 :root {
   --danger-flash: 0 0% 100%;
+  color-scheme: dark;
+}
+
+html.light {
+  color-scheme: light;
+
+  /* ── neutrals: the structure ──
+     950 page + inputs, 900 cards, 800/700 borders and secondary buttons,
+     100–600 text from strongest to faintest. 50 is reserved for text that must
+     out-contrast everything (the active nav tab). */
+  --color-neutral-50: #18181b;
+  --color-neutral-100: #1f1f23;
+  --color-neutral-200: #27272a;
+  --color-neutral-300: #3f3f46;
+  --color-neutral-400: #52525b;
+  --color-neutral-500: #71717a;
+  /* deliberately faint: mirrors how text-neutral-600 barely whispers on dark */
+  --color-neutral-600: #8f8f99;
+  --color-neutral-700: #d4d4d8;
+  --color-neutral-800: #e4e4e7;
+  --color-neutral-900: #ffffff;
+  --color-neutral-950: #f4f4f5;
+
+  /* ── emerald: the money/success accent ──
+     600 and 700 stay strong — they're solid buttons wearing white text. 500 is
+     only ever the *hover* of 600, so it goes darker rather than lighter, which
+     is the light-mode way to say "pressed". */
+  --color-emerald-200: #065f46;
+  --color-emerald-300: #047857;
+  --color-emerald-400: #059669;
+  --color-emerald-500: #047857;
+  --color-emerald-600: #059669;
+  --color-emerald-700: #047857;
+  --color-emerald-800: #6ee7b7;
+  --color-emerald-900: #d1fae5;
+  --color-emerald-950: #ecfdf5;
+
+  /* ── amber: warnings ── 600/700 stay solid buttons */
+  --color-amber-300: #b45309;
+  --color-amber-400: #b45309;
+  --color-amber-600: #d97706;
+  --color-amber-700: #b45309;
+  --color-amber-800: #fcd34d;
+  --color-amber-900: #fef3c7;
+  --color-amber-950: #fffbeb;
+
+  /* ── red: danger ──
+     Unlike the others, 800 keeps its dark value: it is a solid badge with white
+     text ("bg-red-800 text-white"), not a tint. Its use as a border just reads
+     as an emphatic outline. */
+  --color-red-300: #b91c1c;
+  --color-red-400: #dc2626;
+  --color-red-600: #dc2626;
+  --color-red-700: #b91c1c;
+  --color-red-800: #991b1b;
+  --color-red-900: #fecaca;
+  --color-red-950: #fef2f2;
+
+  /* ── sky: retals / informational ──
+     Here 800 IS a tint — it's the hover of the sky-900 badge — so it deepens
+     rather than darkening. The opposite call from red, for the opposite reason. */
+  --color-sky-300: #0369a1;
+  --color-sky-400: #0284c7;
+  --color-sky-800: #7dd3fc;
+  --color-sky-900: #bae6fd;
+  --color-sky-950: #e0f2fe;
 }
 
 html,

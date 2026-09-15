@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 import { sessionMember } from "@/lib/session";
 import { LoginForm } from "./LoginForm";
+import { ThemeToggle } from "../ThemeToggle";
 
 export default async function LoginPage() {
   const member = await sessionMember();
@@ -8,11 +9,15 @@ export default async function LoginPage() {
 
   return (
     <main className="mx-auto flex min-h-screen max-w-md flex-col justify-center gap-6 px-4 py-10">
-      <div>
-        <h1 className="text-3xl font-bold tracking-tight">ChainWatch</h1>
-        <p className="mt-1 text-neutral-400">
-          Saver duty tracker for <span className="font-semibold text-neutral-200">EPIC Mafia</span>
-        </p>
+      <div className="flex items-start gap-3">
+        <div className="flex-1">
+          <h1 className="text-3xl font-bold tracking-tight">ChainWatch</h1>
+          <p className="mt-1 text-neutral-400">
+            Saver duty tracker for{" "}
+            <span className="font-semibold text-neutral-200">EPIC Mafia</span>
+          </p>
+        </div>
+        <ThemeToggle />
       </div>
 
       <LoginForm />

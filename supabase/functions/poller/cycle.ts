@@ -337,7 +337,9 @@ export async function runPollCycle(db: SupabaseClient, faction: FactionTarget): 
 
     // ── accrue availability pay for this slice of time ───────────────────
     const lastAccrualS = state.last_accrual_at ? toS(state.last_accrual_at) : nowS;
-    await accruePay(db, activeShifts, settings, obsActive, nowS, lastAccrualS);
+    // a failed write leaves the cursor alone so the next cycle re-credits the
+    // slice (accruePay caps a catch-up at 3 poll intervals)
+    const accrued = await accruePay(db, activeShifts, settings, obsActive, nowS, lastAccrualS);
 
     // ── attribute pending saves via on-duty members' own attack logs ─────
     activeShifts = await attributePendingSaves(db, fid, activeShifts, settings, nowS);
@@ -429,7 +431,7 @@ export async function runPollCycle(db: SupabaseClient, faction: FactionTarget): 
         consecutive_errors: 0,
         danger_episode_key: dangerEpisodeKey,
         roster_refreshed_at: rosterRefreshedAt,
-        last_accrual_at: toIso(nowS),
+        ...(accrued ? { last_accrual_at: toIso(nowS) } : {}),
         ...(shouldPoke
           ? { last_broadcast_fingerprint: fingerprint, last_broadcast_at: toIso(nowS) }
           : {}),
@@ -486,6 +488,8 @@ async function pickPollerMember(
  * actually attack. The per-saver rate depends on how many are eligible RIGHT
  * NOW (1-2 → full rate each, 3+ → a doubled pool split evenly), which is why
  * this accrues continuously instead of being derived from the shift span.
+ *
+ * Returns false only when the write failed, i.e. the slice is still owed.
  */
 async function accruePay(
   db: SupabaseClient,
@@ -494,17 +498,17 @@ async function accruePay(
   chainLive: boolean,
   nowS: number,
   lastAccrualS: number,
-): Promise<void> {
+): Promise<boolean> {
   // never credit a long poller outage as if it had been watched
   const elapsed = Math.min(Math.max(0, nowS - lastAccrualS), settings.poll_interval_s * 3);
-  if (elapsed <= 0 || !chainLive || !settings.saving_enabled) return;
+  if (elapsed <= 0 || !chainLive || !settings.saving_enabled) return true;
 
   // pay only savers who can actually save: not blocked (travel/hospital/…),
   // and — for factions that save from abroad — actually abroad
   const eligible = activeShifts.filter(
     (s) => !s.unavailable_state && (!settings.abroad_only || s.abroad),
   );
-  if (eligible.length === 0) return;
+  if (eligible.length === 0) return true;
 
   const rows = eligible
     .map((s) => ({
@@ -518,9 +522,13 @@ async function accruePay(
   if (rows.length !== eligible.length) {
     console.error("skipped accrual rows with a non-numeric rate", { eligible: eligible.length });
   }
-  if (rows.length === 0) return;
+  if (rows.length === 0) return true;
   const { error } = await db.rpc("accrue_shifts", { p_rows: rows });
-  if (error) console.error("pay accrual failed:", error);
+  if (error) {
+    console.error("pay accrual failed:", error);
+    return false;
+  }
+  return true;
 }
 
 async function attributePendingSaves(
@@ -1095,6 +1103,7 @@ async function syncAvailability(
       await db
         .from("unavailable_periods")
         .update({ ended_at: nowIso })
+        .eq("faction_id", fid)
         .eq("member_id", shift.member_id)
         .is("ended_at", null);
       await dispatch(db, [shift.member_id], {
@@ -1140,12 +1149,13 @@ async function syncAvailability(
     await db
       .from("unavailable_periods")
       .update({ ended_at: nowIso })
+      .eq("faction_id", fid)
       .eq("member_id", shift.member_id)
       .is("ended_at", null);
     if (blocked) {
       await db
         .from("unavailable_periods")
-        .insert({ member_id: shift.member_id, state: blocked });
+        .insert({ faction_id: fid, member_id: shift.member_id, state: blocked });
     }
     await db.from("shifts").update({ unavailable_state: blocked }).eq("id", shift.id);
     shift.unavailable_state = blocked;

@@ -200,6 +200,7 @@ create index announcements_pending on announcements (faction_id, created_at)
 -- Savers who physically can't attack (flying, hospital, jail).
 create table unavailable_periods (
   id uuid primary key default gen_random_uuid(),
+  faction_id bigint not null references factions (faction_id) on delete cascade,
   member_id bigint not null references members (torn_id) on delete cascade,
   state text not null,
   started_at timestamptz not null default now(),
@@ -208,7 +209,7 @@ create table unavailable_periods (
 -- one open period per member keeps the intervals disjoint
 create unique index one_open_unavailable on unavailable_periods (member_id)
   where ended_at is null;
-create index unavailable_member on unavailable_periods (member_id, started_at);
+create index unavailable_member on unavailable_periods (faction_id, member_id, started_at);
 
 -- Planned availability ("I can save Tuesday 18–21").
 create table availability_slots (

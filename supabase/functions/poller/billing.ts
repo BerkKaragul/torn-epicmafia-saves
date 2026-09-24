@@ -161,10 +161,17 @@ async function fetchLogWindow(
   from: number,
 ): Promise<TornUserLog[]> {
   const PAGE = 100;
+  const MAX_PAGES = 50;
   const all = new Map<string, TornUserLog>();
   let lo = from;
   let hi: number | undefined;
-  for (let page = 0; page < 10; page++) {
+  for (let page = 0; ; page++) {
+    // Running out of pages must NOT return a partial window: the caller would
+    // advance the cursor past entries never read and lose those payments.
+    // Failing leaves the cursor where it is and shows up on /platform.
+    if (page >= MAX_PAGES) {
+      throw new Error(`vendor log window since ${from} exceeds ${MAX_PAGES * PAGE} entries`);
+    }
     const logs = await torn.userLog({ log: typeIds, from: lo, to: hi, limit: PAGE });
     for (const l of logs) all.set(String(l.id), l);
     if (logs.length < PAGE) break;

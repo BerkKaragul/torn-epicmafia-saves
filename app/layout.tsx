@@ -1,11 +1,10 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
-import { Decor } from "./Decor";
 import { THEME_BOOT_SCRIPT } from "./theme";
 
 export const metadata: Metadata = {
-  title: "ChainWatch — EPIC Mafia",
-  description: "Chain saver duty tracker for EPIC Mafia [40959]",
+  title: "ChainWatch",
+  description: "Chain saver duty tracker for Torn factions",
   manifest: "/manifest.webmanifest",
   icons: { icon: "/icon.svg" },
 };
@@ -31,7 +30,6 @@ export default function RootLayout({
       </head>
       <body className="min-h-screen bg-neutral-950 text-neutral-100 antialiased">
         {children}
-        <Decor />
       </body>
     </html>
   );

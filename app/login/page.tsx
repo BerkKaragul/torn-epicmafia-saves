@@ -13,8 +13,7 @@ export default async function LoginPage() {
         <div className="flex-1">
           <h1 className="text-3xl font-bold tracking-tight">ChainWatch</h1>
           <p className="mt-1 text-neutral-400">
-            Saver duty tracker for{" "}
-            <span className="font-semibold text-neutral-200">EPIC Mafia</span>
+            Chain saver duty tracker for Torn factions
           </p>
         </div>
         <ThemeToggle />
@@ -32,7 +31,7 @@ export default async function LoginPage() {
             </tr>
             <tr className="border-t border-neutral-800">
               <th className="py-1.5 pr-3 font-medium text-neutral-300">Purpose of use</th>
-              <td>Verify faction membership, read the faction chain, and read your own attacks to credit your chain saves</td>
+              <td>Identify you and your faction, read your faction&apos;s chain, and read your own attacks to credit your chain saves</td>
             </tr>
             <tr className="border-t border-neutral-800">
               <th className="py-1.5 pr-3 font-medium text-neutral-300">Key storage</th>
@@ -40,11 +39,11 @@ export default async function LoginPage() {
             </tr>
             <tr className="border-t border-neutral-800">
               <th className="py-1.5 pr-3 font-medium text-neutral-300">Data storage</th>
-              <td>Persistent — until you log in with a new key or ask an admin to delete you</td>
+              <td>Persistent — until you log in with a new key or ask the operator to delete your account</td>
             </tr>
             <tr className="border-t border-neutral-800">
               <th className="py-1.5 pr-3 font-medium text-neutral-300">Data sharing</th>
-              <td>Duty hours, saves and payouts are visible to faction leadership; nothing is shared outside the faction</td>
+              <td>Duty hours, saves and payouts are visible to your own faction only; nothing is shared with other factions or third parties</td>
             </tr>
           </tbody>
         </table>

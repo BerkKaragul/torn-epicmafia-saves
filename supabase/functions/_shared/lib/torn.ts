@@ -157,6 +157,26 @@ export interface TornKeyInfo {
   selections: Record<string, string[]>;
 }
 
+export interface TornUserFaction {
+  id: number;
+  name: string;
+  tag: string;
+  position: string;
+  days_in_faction: number;
+}
+
+export interface TornUserLog {
+  id: string;
+  timestamp: number;
+  details: { id: number; title: string; category: string };
+  /** dynamic per log type */
+  data: Record<string, unknown>;
+  params: Record<string, unknown>;
+}
+
+const factionPath = (factionId: number | undefined, selection: string) =>
+  factionId ? `/faction/${factionId}/${selection}` : `/faction/${selection}`;
+
 export class TornApiError extends Error {
   constructor(
     public code: number,
@@ -226,12 +246,36 @@ export function makeTornClient(opts: TornClientOptions) {
   return {
     keyInfo: () => call<{ info: TornKeyInfo }>("/key/info").then((r) => r.info),
     userBasic: () => call<{ profile: TornUserBasic }>("/user/basic").then((r) => r.profile),
-    factionBasic: () => call<{ basic: TornFactionBasic }>("/faction/basic").then((r) => r.basic),
-    factionChain: () => call<{ chain: TornChain }>("/faction/chain").then((r) => r.chain),
-    factionMembers: () =>
-      call<{ members: TornFactionMember[] }>("/faction/members").then((r) => r.members),
-    rankedWars: () =>
-      call<{ rankedwars: TornRankedWar[] }>("/faction/rankedwars").then((r) => r.rankedwars),
+    // The faction endpoints take an optional explicit faction id. The poller
+    // always passes one: a member who changed faction since they last logged
+    // in would otherwise make their key report the WRONG faction's chain.
+    factionBasic: (factionId?: number) =>
+      call<{ basic: TornFactionBasic }>(factionPath(factionId, "basic")).then((r) => r.basic),
+    factionChain: (factionId?: number) =>
+      call<{ chain: TornChain }>(factionPath(factionId, "chain")).then((r) => r.chain),
+    factionMembers: (factionId?: number) =>
+      call<{ members: TornFactionMember[] }>(factionPath(factionId, "members")).then(
+        (r) => r.members,
+      ),
+    rankedWars: (factionId?: number) =>
+      call<{ rankedwars: TornRankedWar[] }>(factionPath(factionId, "rankedwars")).then(
+        (r) => r.rankedwars,
+      ),
+    /** The faction a user belongs to, or null (vendor billing: who paid?). */
+    userFaction: (userId: number) =>
+      call<{ faction: TornUserFaction | null }>(`/user/${userId}/faction`).then((r) => r.faction),
+    /** Log type ids and titles (used to find the "item receive" log types). */
+    logTypes: () => call<{ logtypes: { id: number; title: string }[] }>("/torn/logtypes").then(
+      (r) => r.logtypes,
+    ),
+    /** Own logs — Full Access keys only. */
+    userLog: (params: { log?: number[]; from?: number; to?: number; limit?: number }) =>
+      call<{ log: TornUserLog[] }>("/user/log", {
+        ...(params.log?.length ? { log: params.log.join(",") } : {}),
+        ...(params.from !== undefined ? { from: params.from } : {}),
+        ...(params.to !== undefined ? { to: params.to } : {}),
+        ...(params.limit !== undefined ? { limit: params.limit } : {}),
+      }).then((r) => r.log ?? []),
     rankedWarReport: (warId: number) =>
       call<{ rankedwarreport: TornRankedWarReport }>(`/faction/${warId}/rankedwarreport`).then(
         (r) => r.rankedwarreport,

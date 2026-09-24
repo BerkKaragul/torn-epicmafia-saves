@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { decryptKey } from "@/lib/crypto";
-import { sessionMember, unauthorized } from "@/lib/session";
+import { requireMember } from "@/lib/session";
 import { tornClient } from "@/lib/torn";
 import { canEnlistFromStatus } from "@/supabase/functions/_shared/logic/travel";
 import { rotationOrder } from "@/supabase/functions/_shared/logic/rotation";
@@ -9,8 +9,9 @@ import type { ShiftRow } from "@/lib/types";
 
 // POST = start a duty shift, PATCH = stop the active one
 export async function POST(req: Request) {
-  const member = await sessionMember();
-  if (!member) return unauthorized();
+  const auth = await requireMember();
+  if (auth.error) return auth.error;
+  const { member, fid } = auth.ctx;
   if (!member.key_valid) {
     return NextResponse.json(
       { error: "Your stored API key stopped working — log in again first." },
@@ -18,28 +19,35 @@ export async function POST(req: Request) {
     );
   }
 
-  // You can only enlist while you can actually go on to save: already abroad, or
-  // flying OUT to another country. Not from Torn (nothing to save at home) and
-  // not on the way back (you're done). Checked live against Torn with your key.
-  try {
-    if (!member.api_key_ct || !member.api_key_iv) throw new Error("no key on file");
-    const key = await decryptKey(member.api_key_ct, member.api_key_iv);
-    const profile = await tornClient(key).userBasic();
-    if (!canEnlistFromStatus(profile.status?.state ?? "Okay", profile.status?.description)) {
+  // Factions that save from abroad: you can only enlist while you can actually
+  // go on to save — already abroad, or flying OUT to another country. Not from
+  // Torn and not on the way back. Checked live against Torn with your key.
+  const { data: rules } = await db()
+    .from("settings")
+    .select("abroad_only")
+    .eq("faction_id", fid)
+    .single();
+  if (rules?.abroad_only) {
+    try {
+      if (!member.api_key_ct || !member.api_key_iv) throw new Error("no key on file");
+      const key = await decryptKey(member.api_key_ct, member.api_key_iv);
+      const profile = await tornClient(key).userBasic();
+      if (!canEnlistFromStatus(profile.status?.state ?? "Okay", profile.status?.description)) {
+        return NextResponse.json(
+          {
+            error:
+              "You can only go on duty while abroad or flying to another country — not from Torn or on the way back.",
+          },
+          { status: 409 },
+        );
+      }
+    } catch (e) {
+      console.error("enlist status check failed", e);
       return NextResponse.json(
-        {
-          error:
-            "You can only go on duty while abroad or flying to another country — not from Torn or on the way back.",
-        },
-        { status: 409 },
+        { error: "Couldn't check your travel status just now — try again in a moment." },
+        { status: 503 },
       );
     }
-  } catch (e) {
-    console.error("enlist status check failed", e);
-    return NextResponse.json(
-      { error: "Couldn't check your travel status just now — try again in a moment." },
-      { status: 503 },
-    );
   }
 
   let plannedMinutes: number | null = null;
@@ -60,6 +68,7 @@ export async function POST(req: Request) {
 
   // start_shift enforces the saver cap atomically under an advisory lock
   const { data, error } = await db().rpc("start_shift", {
+    p_faction: fid,
     p_member_id: member.torn_id,
     p_planned_minutes: plannedMinutes,
   });
@@ -88,8 +97,9 @@ export async function POST(req: Request) {
 }
 
 export async function PATCH(req: Request) {
-  const member = await sessionMember();
-  if (!member) return unauthorized();
+  const auth = await requireMember();
+  if (auth.error) return auth.error;
+  const { member, fid } = auth.ctx;
 
   let message: string | null = null;
   try {
@@ -105,6 +115,7 @@ export async function PATCH(req: Request) {
   const { data: active } = await db()
     .from("shifts")
     .select("member_id, started_at, last_save_at, deprioritized_at")
+    .eq("faction_id", fid)
     .is("ended_at", null);
   const order = rotationOrder(
     (active ?? []).map((s) => ({
@@ -134,6 +145,7 @@ export async function PATCH(req: Request) {
   // the poller broadcasts this to the remaining savers within ~15s
   if (othersRemain && (message || wasHead)) {
     await db().from("announcements").insert({
+      faction_id: fid,
       member_id: member.torn_id,
       message,
       was_head: wasHead,

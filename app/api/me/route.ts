@@ -1,12 +1,13 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { sessionMember, unauthorized } from "@/lib/session";
+import { requireMember } from "@/lib/session";
 import { perSaverHourlyRate } from "@/supabase/functions/_shared/logic/pay";
 import type { SaveRow, SettingsRow, ShiftRow } from "@/lib/types";
 
 export async function GET() {
-  const member = await sessionMember();
-  if (!member) return unauthorized();
+  const auth = await requireMember();
+  if (auth.error) return auth.error;
+  const { member, fid } = auth.ctx;
 
   const [
     { data: activeShift },
@@ -14,45 +15,50 @@ export async function GET() {
     { data: unpaidDuty },
     { data: mySaves },
     { count: missedTurns },
-    { count: activeSavers },
-    { count: eligibleSavers },
+    { data: activeRows },
     { data: pollerState },
   ] = await Promise.all([
       db()
         .from("shifts")
         .select("*")
+        .eq("faction_id", fid)
         .eq("member_id", member.torn_id)
         .is("ended_at", null)
         .maybeSingle<ShiftRow>(),
-      db().from("settings").select("*").eq("id", 1).single<SettingsRow>(),
-      // billable = only time a chain was live during the member's unpaid shifts
-      db().rpc("member_unpaid_duty", { p_member: member.torn_id }),
+      db().from("settings").select("*").eq("faction_id", fid).single<SettingsRow>(),
+      // accrued = only time a chain was live and the saver could actually save
+      db().rpc("member_duty_totals", { p_faction: fid, p_member: member.torn_id }),
       db()
         .from("saves")
         .select("*")
+        .eq("faction_id", fid)
         .eq("member_id", member.torn_id)
         .eq("status", "confirmed")
-        .is("payout_line_id", null)
         .returns<SaveRow[]>(),
       db()
         .from("missed_turns")
         .select("id", { count: "exact", head: true })
+        .eq("faction_id", fid)
         .eq("member_id", member.torn_id),
-      db().from("shifts").select("id", { count: "exact", head: true }).is("ended_at", null),
-      // savers actually earning right now: on duty, not blocked, and abroad
-      // (home-city time doesn't earn) — this drives the live per-saver split
       db()
         .from("shifts")
-        .select("id", { count: "exact", head: true })
+        .select("unavailable_state, abroad")
+        .eq("faction_id", fid)
         .is("ended_at", null)
-        .is("unavailable_state", null)
-        .eq("abroad", true),
+        .returns<{ unavailable_state: string | null; abroad: boolean }[]>(),
       db()
         .from("poller_state")
         .select("last_chain_id, last_current, last_max, last_timeout_s, last_cooldown_s, last_poll_at")
-        .eq("id", 1)
+        .eq("faction_id", fid)
         .maybeSingle(),
     ]);
+
+  // savers actually earning right now: on duty, not blocked, and — if the
+  // faction saves from abroad — abroad. Drives the live per-saver split.
+  const activeSavers = (activeRows ?? []).length;
+  const eligibleSavers = (activeRows ?? []).filter(
+    (s) => !s.unavailable_state && (!settings?.abroad_only || s.abroad),
+  ).length;
 
   const duty = (unpaidDuty ?? { duty_seconds: 0, hours_amount: 0 }) as {
     duty_seconds: number;
@@ -105,8 +111,10 @@ export async function GET() {
         : 0,
     },
     alert_threshold_s: settings?.alert_threshold_s ?? 90,
+    realtime_topic: auth.ctx.faction.realtime_topic,
     unavailable_state: activeShift?.unavailable_state ?? null,
     abroad: activeShift?.abroad ?? false,
+    abroad_only: settings?.abroad_only ?? false,
     missed_turns: missedTurns ?? 0,
     slots: { cap: settings?.saver_cap ?? 0, active: activeSavers ?? 0 },
   });

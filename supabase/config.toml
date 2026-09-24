@@ -3,7 +3,8 @@
 # JWT — so JWT verification MUST stay off or every cron call gets rejected and
 # the poller silently stops. Pinning it here keeps `supabase functions deploy`
 # from flipping it back to the true default.
-project_id = "betugujkfdblyfnlyikr"
+#
+# `supabase link --project-ref <ref>` records your project; no id is needed here.
 
 [functions.poller]
 verify_jwt = false

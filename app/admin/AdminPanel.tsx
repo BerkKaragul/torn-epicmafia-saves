@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 
 interface Settings {
   saving_enabled: boolean;
-  widget_token: string;
+  abroad_only: boolean;
   hourly_rate: number;
   per_save_bonus: number;
   save_bonus_mode: "flat" | "scaled";
@@ -41,6 +41,7 @@ export function AdminPanel() {
   const [members, setMembers] = useState<AdminMember[]>([]);
   const [saves, setSaves] = useState<AdminSave[]>([]);
   const [msg, setMsg] = useState<string | null>(null);
+  const [widgetToken, setWidgetToken] = useState<string | null>(null);
   const [attrTarget, setAttrTarget] = useState<Record<string, string>>({});
   // in-app confirmation — native confirm() gets silently disabled once a
   // browser shows its "prevent this page from prompting" checkbox, which dead-
@@ -60,6 +61,7 @@ export function AdminPanel() {
       fetch("/api/admin/saves").then((r) => r.json()),
     ]);
     if (s.settings) setSettings(s.settings);
+    if (s.widget_token) setWidgetToken(s.widget_token);
     if (m.members) setMembers(m.members);
     if (sv.saves) setSaves(sv.saves);
   }, []);
@@ -277,6 +279,18 @@ export function AdminPanel() {
               <option value="scaled">Scaled — base × (chain ÷ 100)</option>
             </select>
           </label>
+          <label className="col-span-2 flex items-start gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={settings.abroad_only}
+              onChange={(e) => setSettings({ ...settings, abroad_only: e.target.checked })}
+              className="mt-1"
+            />
+            <span className="text-neutral-400">
+              Save from abroad only — enlisting needs you abroad (or flying out), pay accrues only
+              abroad, and flying home ends the shift.
+            </span>
+          </label>
         </div>
         <p className="mt-2 text-xs text-neutral-500">
           Scaled mode: saving a 1,200-chain pays 12× the base; anything at or below 100 pays the
@@ -426,8 +440,8 @@ export function AdminPanel() {
       <section className="rounded-xl border border-neutral-800 bg-neutral-900 p-5">
         <h2 className="font-bold">Torn browser widget (Tampermonkey)</h2>
         <p className="mt-1 text-xs text-neutral-500">
-          A small script that shows the current &amp; next saver right inside torn.com. No setup or
-          token — it just works once installed. Share the steps with the faction.
+          A small script that shows the current &amp; next saver right inside torn.com. The install
+          link below is unique to your faction — share it with your members only.
         </p>
 
         <ol className="mt-3 flex list-decimal flex-col gap-1 pl-5 text-sm text-neutral-300">
@@ -446,7 +460,7 @@ export function AdminPanel() {
           <li>
             Click{" "}
             <a
-              href="/chainwatch.user.js"
+              href={widgetToken ? `/widget/${widgetToken}/chainwatch.user.js` : "#"}
               target="_blank"
               rel="noreferrer"
               className="text-emerald-400 underline"

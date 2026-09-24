@@ -1,7 +1,20 @@
 // Row shapes for the tables the app reads/writes (mirrors 0001_schema.sql).
 
+export interface FactionRow {
+  faction_id: number;
+  name: string;
+  tag: string | null;
+  created_at: string;
+  subscription_expires_at: string | null;
+  trial_granted_at: string | null;
+  suspended: boolean;
+  realtime_topic: string;
+  widget_token: string;
+}
+
 export interface MemberRow {
   torn_id: number;
+  faction_id: number;
   name: string;
   api_key_ct: string | null;
   api_key_iv: string | null;
@@ -15,7 +28,6 @@ export interface MemberRow {
 }
 
 export interface SettingsRow {
-  id: 1;
   faction_id: number;
   hourly_rate: number;
   per_save_bonus: number;
@@ -29,12 +41,15 @@ export interface SettingsRow {
   saver_cap: number;
   save_bonus_mode: "flat" | "scaled";
   saving_enabled: boolean;
+  abroad_only: boolean;
   milestone_warn_hits: number;
+  war_payout_config: unknown;
   updated_at: string;
 }
 
 export interface ShiftRow {
   id: string;
+  faction_id: number;
   member_id: number;
   started_at: string;
   planned_minutes: number | null;
@@ -47,6 +62,8 @@ export interface ShiftRow {
     | "chain_dropped"
     | "saving_disabled"
     | "returning_home"
+    | "left_faction"
+    | "subscription_expired"
     | null;
   hourly_rate_snapshot: number;
   last_save_at: string | null;
@@ -60,11 +77,13 @@ export interface ShiftRow {
   travel_started_at: string | null;
   /** Set when the saver taps "skip my turn" — pushes them to the back. */
   deprioritized_at: string | null;
-  payout_line_id: string | null;
+  billable_seconds: number;
+  earned_amount: number;
 }
 
 export interface SaveRow {
   id: string;
+  faction_id: number;
   torn_chain_id: number;
   chain_count: number;
   window_start: string;
@@ -80,11 +99,11 @@ export interface SaveRow {
   bonus_snapshot: number | null;
   attempts: number;
   note: string | null;
-  payout_line_id: string | null;
   detected_at: string;
 }
 
 export interface ChainRow {
+  faction_id: number;
   torn_chain_id: number;
   started_at: string;
   ended_at: string | null;
@@ -97,6 +116,7 @@ export interface ChainRow {
  * `lines` is a WarPayoutRow[] and `config` a WarPayoutConfig (see lib/warPayout).
  */
 export interface WarPayoutSnapshotRow {
+  faction_id: number;
   torn_war_id: number;
   config: unknown;
   totals: {
@@ -112,30 +132,32 @@ export interface WarPayoutSnapshotRow {
   saved_at: string;
 }
 
-// The two rows below back the retired period-sweep payout system (0032 dropped
-// its functions). The tables are kept for the historical record of what was
-// already paid, which shifts.payout_line_id / saves.payout_line_id still cite.
-export interface PayoutPeriodRow {
-  id: string;
-  period_start: string;
-  period_end: string;
-  created_by: number;
-  created_at: string;
-  status: "draft" | "finalized";
+export interface PlatformConfigRow {
+  xanax_per_period: number | null;
+  period_days: number;
+  trial_days: number;
+  xanax_item_id: number;
+  vendor_torn_id: number | null;
+  vendor_name: string | null;
+  vendor_key_valid: boolean;
+  receive_log_type_ids: number[];
+  billing_cursor: number | null;
+  last_billing_sweep_at: string | null;
+  last_billing_error: string | null;
 }
 
-export interface PayoutLineRow {
+export interface PaymentRow {
   id: string;
-  period_id: string;
-  member_id: number;
-  duty_seconds: number;
-  save_count: number;
-  hours_amount: number;
-  saves_amount: number;
-  total_amount: number;
-  paid_at: string | null;
-  paid_by: number | null;
+  source: "torn_log" | "manual";
+  torn_log_id: string | null;
+  sender_id: number | null;
+  sender_name: string | null;
+  faction_id: number | null;
+  quantity: number;
+  seconds_credited: number;
+  status: "applied" | "unmatched" | "ignored";
   note: string | null;
+  received_at: string;
 }
 
 export interface PushSubscriptionRow {

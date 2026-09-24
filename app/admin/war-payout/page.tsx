@@ -1,16 +1,13 @@
-import { redirect } from "next/navigation";
-import { sessionMember } from "@/lib/session";
+import { navProps, pageContext } from "@/lib/pageGuard";
 import { WarPayoutPanel } from "./WarPayoutPanel";
 import { Nav } from "../../Nav";
 
 export default async function WarPayoutPage() {
-  const member = await sessionMember();
-  if (!member) redirect("/login");
-  if (!member.is_admin) redirect("/");
+  const ctx = await pageContext({ admin: true });
 
   return (
     <main className="mx-auto max-w-5xl px-4 py-6">
-      <Nav current="war-payout" isAdmin name={member.name} />
+      <Nav current="war-payout" {...navProps(ctx)} />
       <WarPayoutPanel />
     </main>
   );

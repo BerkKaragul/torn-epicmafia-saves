@@ -1,25 +1,33 @@
-// ==UserScript==
+// Template for the Tampermonkey widget. /widget/<token>/chainwatch.user.js
+// fills in the placeholders (__SITE__, __HOST__, __TOKEN__, __INSTALL_URL__)
+// so every faction installs a copy that already knows its own feed — no setup
+// inside Torn. Keep this free of backticks and "${" (it's a String.raw).
+
+export const USERSCRIPT_TEMPLATE = String.raw`// ==UserScript==
 // @name         ChainWatch Saver Widget
-// @namespace    chainwatch.epicmafia
-// @version      1.10.0
+// @namespace    chainwatch.widget
+// @version      2.0.0
 // @description  Shows the current & next chain saver (and timer) from ChainWatch, inside Torn — with the same danger siren as the site (one tab plays, not all).
-// @author       EPIC Mafia
+// @author       ChainWatch
 // @license      MIT
 // @match        https://www.torn.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_setClipboard
-// @connect      torn-epicmafia-saves.vercel.app
+// @connect      __HOST__
+// @updateURL    __INSTALL_URL__
+// @downloadURL  __INSTALL_URL__
 // @run-at       document-idle
 // ==/UserScript==
 
 (function () {
   "use strict";
 
-  // No setup needed — it just works. Data is faction-scoped and read-only
-  // (saver names + chain timer only).
-  const SITE = "https://torn-epicmafia-saves.vercel.app";
+  // No setup needed — this copy was generated for your faction, with its
+  // widget token baked in. Data is read-only (saver names + chain timer only).
+  const SITE = "__SITE__";
+  const TOKEN = "__TOKEN__";
   // Adaptive cadence: relaxed while the chain is healthy, tight in the danger
   // window so a landed save clears the siren within seconds (war = seconds).
   const POLL_CALM_MS = 7000;
@@ -32,7 +40,7 @@
   // ── danger siren ─────────────────────────────────────────────────────────
   // A verbatim port of the website's alarm (lib/alarm.ts): a harsh sawtooth
   // air-raid siren sweeping through a dissonant partner tone, chopped by a
-  // fast tremolo. `critical` (chain about to die) is faster, higher and louder.
+  // fast tremolo. "critical" (chain about to die) is faster, higher and louder.
   let audioCtx = null;
   let sirenVol = GM_getValue("cw_vol", 1); // per-device siren loudness, 0–1
   let onlyDuty = GM_getValue("cw_onlyduty", false); // only alarm when it's my turn
@@ -443,7 +451,7 @@
   // outdated install without anyone touching the server.
   const MY_VERSION =
     (typeof GM_info !== "undefined" && GM_info.script && GM_info.script.version) || "1.9.0";
-  const INSTALL_URL = "https://greasyfork.org/en/scripts/589168-chainwatch-saver-widget";
+  const INSTALL_URL = "__INSTALL_URL__";
   function cmpVersion(a, b) {
     const pa = String(a).split(".").map((n) => parseInt(n, 10) || 0);
     const pb = String(b).split(".").map((n) => parseInt(n, 10) || 0);
@@ -592,13 +600,15 @@
   function poll() {
     GM_xmlhttpRequest({
       method: "GET",
-      url: SITE + "/api/widget?t=" + Date.now(),
+      url: SITE + "/api/widget?token=" + TOKEN + "&t=" + Date.now(),
       timeout: 10000,
       onload: function (r) {
         syncClock(r.responseHeaders);
         try {
           const j = JSON.parse(r.responseText);
           if (!j.error) data = j;
+          // subscription lapsed / token revoked: stop showing stale numbers
+          else if (r.status === 402 || r.status === 404) data = null;
         } catch (e) {
           /* keep showing last known data */
         }
@@ -638,3 +648,4 @@
   scheduleNextPoll();
   setInterval(render, 1000); // smooth countdown + siren check between polls
 })();
+`;

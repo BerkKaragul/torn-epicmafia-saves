@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { forbidden, sessionMember, unauthorized } from "@/lib/session";
+import { requireMember } from "@/lib/session";
 import { computeWarPayout, normalizeConfig, type WarReportRow } from "@/lib/warPayout";
 
 // non-negative numeric knobs; pool + retalFixed are whole dollars, the rest
@@ -25,17 +25,18 @@ function parseWarId(raw: unknown): number | null {
 
 // GET → { config, wars }  (+ report and any frozen payout when ?war_id= is set)
 export async function GET(req: Request) {
-  const member = await sessionMember();
-  if (!member) return unauthorized();
-  if (!member.is_admin) return forbidden();
+  const auth = await requireMember({ admin: true });
+  if (auth.error) return auth.error;
+  const { member, fid } = auth.ctx;
 
   const warParam = new URL(req.url).searchParams.get("war_id");
 
   const [{ data: settings }, { data: wars }] = await Promise.all([
-    db().from("settings").select("war_payout_config").eq("id", 1).single(),
+    db().from("settings").select("war_payout_config").eq("faction_id", fid).single(),
     db()
       .from("wars")
       .select("torn_war_id, opponent_name, started_at, ended_at, our_score, their_score, target")
+      .eq("faction_id", fid)
       .order("started_at", { ascending: false })
       .limit(25),
   ]);
@@ -49,6 +50,7 @@ export async function GET(req: Request) {
   let pendingChains = 0;
   if (warParam) {
     const { data, error } = await db().rpc("war_report", {
+      p_faction: fid,
       p_war: warParam === "all" ? null : Number(warParam),
     });
     if (error) {
@@ -64,6 +66,7 @@ export async function GET(req: Request) {
         const { count } = await db()
           .from("chains")
           .select("torn_chain_id", { count: "exact", head: true })
+          .eq("faction_id", fid)
           .eq("report_synced", false)
           .lt("started_at", warEnd)
           .or(`ended_at.is.null,ended_at.gt.${war.started_at}`);
@@ -73,6 +76,7 @@ export async function GET(req: Request) {
       const { data: snap } = await db()
         .from("war_payouts")
         .select("torn_war_id, config, totals, saved_by, saved_at, members:saved_by(name)")
+        .eq("faction_id", fid)
         .eq("torn_war_id", Number(warParam))
         .maybeSingle();
       saved = snap ?? null;
@@ -94,9 +98,9 @@ export async function GET(req: Request) {
 // browser, so the published record is always the maths this codebase does — the
 // admin is committing to a war + a set of weights, not to a table they posted.
 export async function POST(req: Request) {
-  const admin = await sessionMember();
-  if (!admin) return unauthorized();
-  if (!admin.is_admin) return forbidden();
+  const auth = await requireMember({ admin: true });
+  if (auth.error) return auth.error;
+  const { member: admin, fid } = auth.ctx;
 
   let body: { war_id?: unknown; config?: unknown };
   try {
@@ -116,6 +120,7 @@ export async function POST(req: Request) {
   const { data: war } = await db()
     .from("wars")
     .select("torn_war_id")
+    .eq("faction_id", fid)
     .eq("torn_war_id", warId)
     .maybeSingle();
   if (!war) return NextResponse.json({ error: "Unknown war." }, { status: 404 });
@@ -128,7 +133,10 @@ export async function POST(req: Request) {
     );
   }
 
-  const { data: report, error } = await db().rpc("war_report", { p_war: warId });
+  const { data: report, error } = await db().rpc("war_report", {
+    p_faction: fid,
+    p_war: warId,
+  });
   if (error) {
     console.error("war_report failed", error);
     return NextResponse.json({ error: "Could not build the report" }, { status: 500 });
@@ -144,6 +152,7 @@ export async function POST(req: Request) {
     .from("war_payouts")
     .upsert(
       {
+        faction_id: fid,
         torn_war_id: warId,
         config,
         totals: {
@@ -162,7 +171,7 @@ export async function POST(req: Request) {
         saved_by: admin.torn_id,
         saved_at: new Date().toISOString(),
       },
-      { onConflict: "torn_war_id" },
+      { onConflict: "faction_id,torn_war_id" },
     );
   if (saveError) {
     console.error("save war payout failed", saveError);
@@ -174,9 +183,9 @@ export async function POST(req: Request) {
 
 // PATCH → save the weight config as the new defaults
 export async function PATCH(req: Request) {
-  const admin = await sessionMember();
-  if (!admin) return unauthorized();
-  if (!admin.is_admin) return forbidden();
+  const auth = await requireMember({ admin: true });
+  if (auth.error) return auth.error;
+  const { member: admin, fid } = auth.ctx;
 
   let body: Record<string, unknown>;
   try {
@@ -200,7 +209,7 @@ export async function PATCH(req: Request) {
   const { error } = await db()
     .from("settings")
     .update({ war_payout_config: config, updated_at: new Date().toISOString() })
-    .eq("id", 1);
+    .eq("faction_id", fid);
   if (error) {
     console.error("save war payout config failed", error);
     return NextResponse.json({ error: "Could not save defaults" }, { status: 500 });
@@ -210,14 +219,18 @@ export async function PATCH(req: Request) {
 
 // DELETE ?war_id= → unpublish a war payout (it was saved by mistake)
 export async function DELETE(req: Request) {
-  const admin = await sessionMember();
-  if (!admin) return unauthorized();
-  if (!admin.is_admin) return forbidden();
+  const auth = await requireMember({ admin: true });
+  if (auth.error) return auth.error;
+  const { member: admin, fid } = auth.ctx;
 
   const warId = parseWarId(new URL(req.url).searchParams.get("war_id"));
   if (!warId) return NextResponse.json({ error: "war_id required" }, { status: 400 });
 
-  const { error } = await db().from("war_payouts").delete().eq("torn_war_id", warId);
+  const { error } = await db()
+    .from("war_payouts")
+    .delete()
+    .eq("faction_id", fid)
+    .eq("torn_war_id", warId);
   if (error) {
     console.error("delete war payout failed", error);
     return NextResponse.json({ error: "Could not remove the war payout" }, { status: 500 });

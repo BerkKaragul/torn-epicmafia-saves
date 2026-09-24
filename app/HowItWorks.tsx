@@ -6,7 +6,7 @@ const STEPS = [
   { icon: "🟢", text: "Open **My duty** → tap **“I can save”**." },
   { icon: "🔔", text: "Tap **Arm danger siren** so you hear the alarm." },
   { icon: "⏳", text: "Wait. When it’s **your turn**, the siren screams." },
-  { icon: "🌍", text: "Attack **anyone abroad** and beat them." },
+  { icon: "🌍", text: "Attack **anyone** and beat them." },
   { icon: "✋", text: "**HOLD** — don’t click Leave/Mug/Hospitalize yet. Wait." },
   { icon: "✅", text: "Land the hit **under 1:00** = a save. You get paid." },
   { icon: "✈️", text: "Flying, hospital or jail? You’re **paused** — no worries." },

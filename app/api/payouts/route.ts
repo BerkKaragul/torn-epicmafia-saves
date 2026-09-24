@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { sessionMember, unauthorized } from "@/lib/session";
+import { requireMember } from "@/lib/session";
 
 // GET → every war whose payout an admin has frozen, newest war first.
 //
@@ -8,16 +8,18 @@ import { sessionMember, unauthorized } from "@/lib/session";
 // should be able to check what they earned. Nothing here is live — it's the
 // snapshot the admin committed to, so reading it can't leak an in-progress war.
 export async function GET() {
-  const member = await sessionMember();
-  if (!member) return unauthorized();
+  const auth = await requireMember();
+  if (auth.error) return auth.error;
+  const { member, fid } = auth.ctx;
 
   const { data, error } = await db()
     .from("war_payouts")
     .select(
       "torn_war_id, config, totals, lines, saved_at, saved_by, " +
-        "wars(opponent_name, started_at, ended_at, our_score, their_score), " +
+        "wars!inner(opponent_name, started_at, ended_at, our_score, their_score), " +
         "members:saved_by(name)",
     )
+    .eq("faction_id", fid)
     .order("saved_at", { ascending: false });
 
   if (error) {

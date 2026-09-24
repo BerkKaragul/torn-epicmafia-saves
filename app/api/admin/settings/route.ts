@@ -1,13 +1,17 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { forbidden, sessionMember, unauthorized } from "@/lib/session";
+import { requireMember } from "@/lib/session";
 
 export async function GET() {
-  const member = await sessionMember();
-  if (!member) return unauthorized();
-  if (!member.is_admin) return forbidden();
-  const { data } = await db().from("settings").select("*").eq("id", 1).single();
-  return NextResponse.json({ settings: data });
+  const auth = await requireMember({ admin: true });
+  if (auth.error) return auth.error;
+  const { member, fid } = auth.ctx;
+  const { data } = await db().from("settings").select("*").eq("faction_id", fid).single();
+  return NextResponse.json({
+    settings: data,
+    widget_token: auth.ctx.faction.widget_token,
+    faction: { id: fid, name: auth.ctx.faction.name },
+  });
 }
 
 const EDITABLE = [
@@ -22,9 +26,9 @@ const EDITABLE = [
 ] as const;
 
 export async function PATCH(req: Request) {
-  const member = await sessionMember();
-  if (!member) return unauthorized();
-  if (!member.is_admin) return forbidden();
+  const auth = await requireMember({ admin: true });
+  if (auth.error) return auth.error;
+  const { member, fid } = auth.ctx;
 
   let body: Record<string, unknown>;
   try {
@@ -49,9 +53,11 @@ export async function PATCH(req: Request) {
       await db()
         .from("shifts")
         .update({ ended_at: new Date().toISOString(), end_reason: "saving_disabled" })
+        .eq("faction_id", fid)
         .is("ended_at", null);
     }
   }
+  if (typeof body.abroad_only === "boolean") patch.abroad_only = body.abroad_only;
   if (typeof body.save_bonus_mode === "string") {
     if (!["flat", "scaled"].includes(body.save_bonus_mode)) {
       return NextResponse.json({ error: "Invalid save bonus mode" }, { status: 400 });
@@ -73,7 +79,7 @@ export async function PATCH(req: Request) {
   const { data, error } = await db()
     .from("settings")
     .update({ ...patch, updated_at: new Date().toISOString() })
-    .eq("id", 1)
+    .eq("faction_id", fid)
     .select("*")
     .single();
   if (error) {

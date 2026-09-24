@@ -1,13 +1,14 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { sessionMember, unauthorized } from "@/lib/session";
+import { requireMember } from "@/lib/session";
 
 const DAY = 24 * 60 * 60 * 1000;
 
 // GET → all slots in the visible window (2 days back … 31 days ahead)
 export async function GET() {
-  const member = await sessionMember();
-  if (!member) return unauthorized();
+  const auth = await requireMember();
+  if (auth.error) return auth.error;
+  const { member, fid } = auth.ctx;
 
   const from = new Date(Date.now() - 2 * DAY).toISOString();
   const to = new Date(Date.now() + 31 * DAY).toISOString();
@@ -15,6 +16,7 @@ export async function GET() {
   const { data, error } = await db()
     .from("availability_slots")
     .select("id, member_id, start_at, end_at, members!inner(name)")
+    .eq("faction_id", fid)
     .gte("end_at", from)
     .lte("start_at", to)
     .order("start_at");
@@ -43,8 +45,9 @@ export async function GET() {
 
 // POST { start_at, end_at } (ISO) → add one of my availability slots
 export async function POST(req: Request) {
-  const member = await sessionMember();
-  if (!member) return unauthorized();
+  const auth = await requireMember();
+  if (auth.error) return auth.error;
+  const { member, fid } = auth.ctx;
 
   let body: { start_at?: string; end_at?: string };
   try {
@@ -68,6 +71,7 @@ export async function POST(req: Request) {
   }
 
   const { error } = await db().from("availability_slots").insert({
+    faction_id: fid,
     member_id: member.torn_id,
     start_at: start.toISOString(),
     end_at: end.toISOString(),
@@ -81,8 +85,9 @@ export async function POST(req: Request) {
 
 // DELETE { id } → remove one of my own slots
 export async function DELETE(req: Request) {
-  const member = await sessionMember();
-  if (!member) return unauthorized();
+  const auth = await requireMember();
+  if (auth.error) return auth.error;
+  const { member, fid } = auth.ctx;
   let id: string | undefined;
   try {
     ({ id } = await req.json());

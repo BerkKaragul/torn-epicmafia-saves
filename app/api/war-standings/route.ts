@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { sessionMember, unauthorized } from "@/lib/session";
+import { requireMember } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
 
@@ -17,13 +17,15 @@ interface WarReportRow {
 }
 
 export async function GET() {
-  const member = await sessionMember();
-  if (!member) return unauthorized();
+  const auth = await requireMember();
+  if (auth.error) return auth.error;
+  const { member, fid } = auth.ctx;
 
   // the live war = the one that hasn't ended yet (most recent if several)
   const { data: war } = await db()
     .from("wars")
     .select("torn_war_id, opponent_name, started_at")
+    .eq("faction_id", fid)
     .is("ended_at", null)
     .order("started_at", { ascending: false })
     .limit(1)
@@ -31,7 +33,7 @@ export async function GET() {
 
   if (!war) return NextResponse.json({ war: null, rows: [] });
 
-  const { data, error } = await db().rpc("war_report", { p_war: war.torn_war_id });
+  const { data, error } = await db().rpc("war_report", { p_faction: fid, p_war: war.torn_war_id });
   if (error) {
     console.error("war-standings war_report failed", error);
     return NextResponse.json({ error: "Could not load standings" }, { status: 500 });

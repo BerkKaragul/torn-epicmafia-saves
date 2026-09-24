@@ -50,7 +50,6 @@ const BLOCKING_STATES = new Set(["Traveling", "Hospital", "Jail", "Federal"]);
 const MEMBER_KEY_COLS = "torn_id, name, api_key_ct, api_key_iv, key_valid, rate_limited_until";
 
 interface PollerSettings {
-  faction_id: number;
   poll_interval_s: number;
   idle_poll_interval_s: number;
   poller_member_id: number | null;
@@ -60,9 +59,10 @@ interface PollerSettings {
   save_bonus_mode: SaveBonusMode;
   milestone_warn_hits: number;
   saving_enabled: boolean;
+  abroad_only: boolean;
 }
 
-function sb(): SupabaseClient {
+export function sb(): SupabaseClient {
   return createClient(
     Deno.env.get("SUPABASE_URL")!,
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
@@ -101,13 +101,24 @@ function normalizeRemainingS(raw: number, nowS: number): number {
   return Math.max(0, raw);
 }
 
-export async function runPollCycle(): Promise<void> {
-  const db = sb();
+/** What the poller needs to know about a tenant (see index.ts). */
+export interface FactionTarget {
+  faction_id: number;
+  realtime_topic: string;
+}
+
+/**
+ * One poll cycle for ONE faction. Every read and write below is scoped to
+ * `fid`; the cadence check and overlap lock live on that faction's own
+ * poller_state row, so factions never wait on or interfere with each other.
+ */
+export async function runPollCycle(db: SupabaseClient, faction: FactionTarget): Promise<void> {
+  const fid = faction.faction_id;
   const nowS = Math.floor(Date.now() / 1000);
 
   const [{ data: settingsRow }, { data: state0 }] = await Promise.all([
-    db.from("settings").select("*").eq("id", 1).single(),
-    db.from("poller_state").select("*").eq("id", 1).single(),
+    db.from("settings").select("*").eq("faction_id", fid).single(),
+    db.from("poller_state").select("*").eq("faction_id", fid).single(),
   ]);
   if (!settingsRow || !state0) return;
   const settings = settingsRow as PollerSettings;
@@ -131,10 +142,15 @@ export async function runPollCycle(): Promise<void> {
 
   // ── cadence pre-check: cheap reads only, no lock claim, no writes ──────
   const [{ count: activeShiftCount }, { count: pendingCount }] = await Promise.all([
-    db.from("shifts").select("id", { count: "exact", head: true }).is("ended_at", null),
+    db
+      .from("shifts")
+      .select("id", { count: "exact", head: true })
+      .eq("faction_id", fid)
+      .is("ended_at", null),
     db
       .from("saves")
       .select("id", { count: "exact", head: true })
+      .eq("faction_id", fid)
       .eq("status", "pending"),
   ]);
   const busy = prevActive || (activeShiftCount ?? 0) > 0 || (pendingCount ?? 0) > 0;
@@ -153,7 +169,7 @@ export async function runPollCycle(): Promise<void> {
   const { data: lockRows } = await db
     .from("poller_state")
     .update({ running_since: token })
-    .eq("id", 1)
+    .eq("faction_id", fid)
     .or(`running_since.is.null,running_since.lt.${staleCutoff}`)
     .select("*");
   const state = lockRows?.[0];
@@ -166,13 +182,20 @@ export async function runPollCycle(): Promise<void> {
         `id, member_id, started_at, planned_minutes, last_save_at, unavailable_state, abroad, location, travel_dest, travel_started_at, deprioritized_at, hourly_rate_snapshot, members!inner(${MEMBER_KEY_COLS})`,
       )
       .is("ended_at", null)
+      .eq("faction_id", fid)
       .returns<ActiveShiftRow[]>();
     let activeShifts = activeShiftsRaw ?? [];
 
     // ── resolve a key and observe the chain ──────────────────────────────
-    const pollerMember = await pickPollerMember(db, settings.poller_member_id, activeShifts, nowS);
+    const pollerMember = await pickPollerMember(
+      db,
+      fid,
+      settings.poller_member_id,
+      activeShifts,
+      nowS,
+    );
     if (!pollerMember) {
-      console.warn("no usable API key to poll with — nobody has logged in yet?");
+      console.warn(`[${fid}] no usable API key to poll with — nobody has logged in yet?`);
       return;
     }
 
@@ -186,18 +209,18 @@ export async function runPollCycle(): Promise<void> {
 
     let chain;
     try {
-      chain = await pollerTorn.factionChain();
+      chain = await pollerTorn.factionChain(fid);
     } catch (e) {
       await db
         .from("poller_state")
         .update({ consecutive_errors: (state.consecutive_errors ?? 0) + 1 })
-        .eq("id", 1);
+        .eq("faction_id", fid);
       if (isInvalidKeyError(e)) {
         await db.from("members").update({ key_valid: false }).eq("torn_id", pollerMember.torn_id);
       } else if (isRateLimitError(e)) {
         await backoffMember(db, pollerMember.torn_id);
       }
-      console.error("chain poll failed:", e);
+      console.error(`[${fid}] chain poll failed:`, e);
       return;
     }
 
@@ -214,6 +237,7 @@ export async function runPollCycle(): Promise<void> {
     // observation log: skip pure idle→idle rows; keep raw only while a chain exists
     if (obs.chainId > 0 || obs.cooldownS > 0 || prevActive) {
       await db.from("chain_polls").insert({
+        faction_id: fid,
         polled_at: toIso(nowS),
         torn_chain_id: obs.chainId || null,
         current: obs.current,
@@ -225,7 +249,7 @@ export async function runPollCycle(): Promise<void> {
 
     // who physically can't save right now (flying, hospital, jail) — must run
     // before rotation is used for alerts / save ownership
-    activeShifts = await syncAvailability(db, activeShifts, pollerTorn);
+    activeShifts = await syncAvailability(db, fid, activeShifts, pollerTorn, settings.abroad_only);
 
     // ── run the detector and persist its events ──────────────────────────
     const events = detect(prevObs, obs, {
@@ -238,14 +262,16 @@ export async function runPollCycle(): Promise<void> {
     if (obsActive) {
       await db.from("chains").upsert(
         {
+          faction_id: fid,
           torn_chain_id: obs.chainId,
           started_at: chain.start ? toIso(chain.start) : toIso(nowS),
         },
-        { onConflict: "torn_chain_id", ignoreDuplicates: true },
+        { onConflict: "faction_id,torn_chain_id", ignoreDuplicates: true },
       );
       await db
         .from("chains")
         .update({ max_current: obs.current })
+        .eq("faction_id", fid)
         .eq("torn_chain_id", obs.chainId)
         .lt("max_current", obs.current);
     }
@@ -256,6 +282,7 @@ export async function runPollCycle(): Promise<void> {
         await db
           .from("chains")
           .update({ ended_at: toIso(nowS), end_reason: ev.reason, max_current: ev.finalCount })
+          .eq("faction_id", fid)
           .eq("torn_chain_id", ev.chainId)
           .is("ended_at", null);
       } else if (ev.type === "save_candidate") {
@@ -263,6 +290,7 @@ export async function runPollCycle(): Promise<void> {
         const headAtDanger = rotationOrder(toShiftLites(activeShifts))[0] ?? null;
         await db.from("saves").upsert(
           {
+            faction_id: fid,
             torn_chain_id: ev.chainId,
             chain_count: ev.chainCount,
             window_start: toIso(ev.windowStart),
@@ -271,7 +299,7 @@ export async function runPollCycle(): Promise<void> {
             expected_member_id: headAtDanger,
             status: "pending",
           },
-          { onConflict: "torn_chain_id,chain_count", ignoreDuplicates: true },
+          { onConflict: "faction_id,torn_chain_id,chain_count", ignoreDuplicates: true },
         );
       } else if (ev.type === "milestone_near") {
         // one heads-up per milestone per chain, then a final shout when the
@@ -301,7 +329,7 @@ export async function runPollCycle(): Promise<void> {
             ev.timeoutS,
             fullKey,
             tier === "critical",
-            settings.faction_id,
+            fid,
           );
         }
       }
@@ -312,7 +340,7 @@ export async function runPollCycle(): Promise<void> {
     await accruePay(db, activeShifts, settings, obsActive, nowS, lastAccrualS);
 
     // ── attribute pending saves via on-duty members' own attack logs ─────
-    activeShifts = await attributePendingSaves(db, activeShifts, settings, nowS);
+    activeShifts = await attributePendingSaves(db, fid, activeShifts, settings, nowS);
 
     // ── shift housekeeping (planned durations) ───────────────────────────
     activeShifts = await housekeepShifts(db, activeShifts, nowS);
@@ -323,13 +351,14 @@ export async function runPollCycle(): Promise<void> {
         e.type === "chain_ended" && e.reason === "dropped" && e.finalCount >= 10,
     );
     if (droppedChain && activeShifts.length > 0) {
-      activeShifts = await handleChainDropped(db, activeShifts, droppedChain);
+      activeShifts = await handleChainDropped(db, fid, activeShifts, droppedChain);
     }
 
     // ── broadcast urgent leave notes from savers who just stopped ────────
     const { data: pendingNotes } = await db
       .from("announcements")
       .select("*, members(name)")
+      .eq("faction_id", fid)
       .is("processed_at", null)
       .order("created_at");
     for (const note of pendingNotes ?? []) {
@@ -362,7 +391,7 @@ export async function runPollCycle(): Promise<void> {
         obs.timeoutS,
         `timer_low:${obs.chainId}:${obs.current}:${tier}`,
         tier === "critical",
-        settings.faction_id,
+        fid,
       );
     }
 
@@ -370,14 +399,14 @@ export async function runPollCycle(): Promise<void> {
     const rosterAge = state.roster_refreshed_at ? nowS - toS(state.roster_refreshed_at) : Infinity;
     let rosterRefreshedAt = state.roster_refreshed_at;
     if (rosterAge > 600) {
-      await refreshRoster(db, pollerMember, settings);
-      await syncWars(db, pollerTorn, settings.faction_id);
-      await syncWarReports(db, pollerTorn, settings.faction_id);
+      await refreshRoster(db, fid, pollerTorn);
+      await syncWars(db, pollerTorn, fid);
+      await syncWarReports(db, pollerTorn, fid);
       rosterRefreshedAt = toIso(nowS);
     }
 
     // pull Torn's per-member report for chains that have finished
-    await syncChainReports(db, pollerTorn);
+    await syncChainReports(db, fid, pollerTorn);
 
     // ── poke clients when something changed (they re-fetch /api/state) ───
     const order = rotationOrder(toShiftLites(activeShifts));
@@ -385,7 +414,7 @@ export async function runPollCycle(): Promise<void> {
     const fingerprint = `${obs.chainId}:${obs.current}:${obs.cooldownS > 0}:${danger}:${order.join(",")}`;
     const lastBroadcastS = state.last_broadcast_at ? toS(state.last_broadcast_at) : 0;
     const shouldPoke = fingerprint !== state.last_broadcast_fingerprint || nowS - lastBroadcastS >= 60;
-    if (shouldPoke) await pokeClients();
+    if (shouldPoke) await pokeClients(faction.realtime_topic);
 
     // ── persist state ────────────────────────────────────────────────────
     await db
@@ -405,20 +434,21 @@ export async function runPollCycle(): Promise<void> {
           ? { last_broadcast_fingerprint: fingerprint, last_broadcast_at: toIso(nowS) }
           : {}),
       })
-      .eq("id", 1);
+      .eq("faction_id", fid);
   } finally {
     // release only if we still own the lease — a slow cycle must not clear
     // a newer cycle's claim
     await db
       .from("poller_state")
       .update({ running_since: null })
-      .eq("id", 1)
+      .eq("faction_id", fid)
       .eq("running_since", token);
   }
 }
 
 async function pickPollerMember(
   db: SupabaseClient,
+  fid: number,
   preferredId: number | null,
   activeShifts: ActiveShiftRow[],
   nowS: number,
@@ -428,6 +458,7 @@ async function pickPollerMember(
       .from("members")
       .select(MEMBER_KEY_COLS)
       .eq("torn_id", preferredId)
+      .eq("faction_id", fid)
       .eq("key_valid", true)
       .not("api_key_ct", "is", null)
       .maybeSingle<MemberKeyRow>();
@@ -438,6 +469,7 @@ async function pickPollerMember(
   const { data: fallback } = await db
     .from("members")
     .select(MEMBER_KEY_COLS)
+    .eq("faction_id", fid)
     .eq("key_valid", true)
     .not("api_key_ct", "is", null)
     .or(`rate_limited_until.is.null,rate_limited_until.lt.${new Date().toISOString()}`)
@@ -467,9 +499,11 @@ async function accruePay(
   const elapsed = Math.min(Math.max(0, nowS - lastAccrualS), settings.poll_interval_s * 3);
   if (elapsed <= 0 || !chainLive || !settings.saving_enabled) return;
 
-  // pay only savers who are on-station: not blocked (travel/hospital/…) AND
-  // actually abroad, where saving happens. Home-city time earns nothing.
-  const eligible = activeShifts.filter((s) => !s.unavailable_state && s.abroad);
+  // pay only savers who can actually save: not blocked (travel/hospital/…),
+  // and — for factions that save from abroad — actually abroad
+  const eligible = activeShifts.filter(
+    (s) => !s.unavailable_state && (!settings.abroad_only || s.abroad),
+  );
   if (eligible.length === 0) return;
 
   const rows = eligible
@@ -491,6 +525,7 @@ async function accruePay(
 
 async function attributePendingSaves(
   db: SupabaseClient,
+  fid: number,
   activeShifts: ActiveShiftRow[],
   settings: PollerSettings,
   nowS: number,
@@ -498,6 +533,7 @@ async function attributePendingSaves(
   const { data: pending } = await db
     .from("saves")
     .select("*")
+    .eq("faction_id", fid)
     .eq("status", "pending")
     .order("window_start", { ascending: true });
   if (!pending?.length) return activeShifts;
@@ -587,7 +623,6 @@ async function attributePendingSaves(
         })
         .eq("id", save.id)
         .eq("status", "pending") // never clobber an admin's manual call
-        .is("payout_line_id", null)
         .select("id")
         .maybeSingle();
       if (confirmedRow && headShift) {
@@ -643,12 +678,14 @@ async function attributePendingSaves(
  */
 async function handleChainDropped(
   db: SupabaseClient,
+  fid: number,
   activeShifts: ActiveShiftRow[],
   ev: { chainId: number; finalCount: number },
 ): Promise<ActiveShiftRow[]> {
   const head = rotationOrder(toShiftLites(activeShifts))[0] ?? null;
   if (head) {
     await db.from("missed_turns").insert({
+      faction_id: fid,
       torn_chain_id: ev.chainId,
       chain_count_at_drop: ev.finalCount,
       member_id: head,
@@ -657,6 +694,7 @@ async function handleChainDropped(
   await db
     .from("shifts")
     .update({ ended_at: new Date().toISOString(), end_reason: "chain_dropped" })
+    .eq("faction_id", fid)
     .is("ended_at", null);
 
   if (head) {
@@ -761,34 +799,32 @@ async function alertDanger(
 
 async function refreshRoster(
   db: SupabaseClient,
-  pollerMember: MemberKeyRow,
-  settings: { faction_id: number },
+  fid: number,
+  torn: TornClient,
 ): Promise<void> {
   try {
-    const torn = await tornFor(pollerMember);
-    const [basic, roster] = await Promise.all([torn.factionBasic(), torn.factionMembers()]);
+    const [basic, roster] = await Promise.all([torn.factionBasic(fid), torn.factionMembers(fid)]);
 
-    if (basic.id !== settings.faction_id) {
-      console.error(
-        `poller key belongs to faction ${basic.id}, app tracks ${settings.faction_id} — skipping roster sync`,
-      );
-      return;
-    }
-
+    await db
+      .from("factions")
+      .update({ name: basic.name, tag: basic.tag })
+      .eq("faction_id", fid);
     await db
       .from("settings")
       .update({ leader_id: basic.leader_id, co_leader_id: basic.co_leader_id })
-      .eq("id", 1);
+      .eq("faction_id", fid);
 
     const leaderIds = [basic.leader_id, basic.co_leader_id].filter(Boolean) as number[];
     if (leaderIds.length) {
       await db
         .from("members")
         .update({ is_admin: true, admin_source: "auto" })
+        .eq("faction_id", fid)
         .in("torn_id", leaderIds);
       await db
         .from("members")
         .update({ is_admin: false, admin_source: null })
+        .eq("faction_id", fid)
         .eq("admin_source", "auto")
         .not("torn_id", "in", `(${leaderIds.join(",")})`);
     }
@@ -796,46 +832,54 @@ async function refreshRoster(
     // names for everyone, so war reports can label members who never signed in
     await db.from("roster").upsert(
       roster.map((m) => ({
+        faction_id: fid,
         torn_id: m.id,
         name: m.name,
         updated_at: new Date().toISOString(),
       })),
-      { onConflict: "torn_id" },
+      { onConflict: "faction_id,torn_id" },
     );
 
-    // members who left the faction lose their active shift
-    const rosterIds = new Set(roster.map((m) => m.id));
-    const { data: registered } = await db.from("members").select("torn_id, name");
+    // members who left the faction lose their active shift and their admin
+    // rights here; logging in again moves them to their new faction
+    const rosterById = new Map(roster.map((m) => [m.id, m]));
+    const { data: registered } = await db
+      .from("members")
+      .select("torn_id, name")
+      .eq("faction_id", fid);
     for (const m of registered ?? []) {
-      const fresh = roster.find((r) => r.id === m.torn_id);
+      const fresh = rosterById.get(m.torn_id);
       if (fresh && fresh.name !== m.name) {
         await db.from("members").update({ name: fresh.name }).eq("torn_id", m.torn_id);
       }
-      if (!rosterIds.has(m.torn_id)) {
+      if (!fresh) {
         await db
           .from("shifts")
-          .update({ ended_at: new Date().toISOString(), end_reason: "admin" })
+          .update({ ended_at: new Date().toISOString(), end_reason: "left_faction" })
+          .eq("faction_id", fid)
           .eq("member_id", m.torn_id)
           .is("ended_at", null);
+        await db
+          .from("members")
+          .update({ is_admin: false, admin_source: null })
+          .eq("torn_id", m.torn_id)
+          .eq("faction_id", fid);
       }
     }
   } catch (e) {
-    console.error("roster refresh failed:", e);
+    console.error(`[${fid}] roster refresh failed:`, e);
   }
 }
 
 /** Keeps the ranked-war list current so reports can be scoped per war. */
-async function syncWars(
-  db: SupabaseClient,
-  torn: TornClient,
-  factionId: number,
-): Promise<void> {
+async function syncWars(db: SupabaseClient, torn: TornClient, fid: number): Promise<void> {
   try {
-    const wars = await torn.rankedWars();
+    const wars = await torn.rankedWars(fid);
     const rows = wars.slice(0, 25).map((w) => {
-      const us = w.factions.find((f) => f.id === factionId) ?? w.factions[0];
+      const us = w.factions.find((f) => f.id === fid) ?? w.factions[0];
       const them = w.factions.find((f) => f.id !== us.id) ?? w.factions[1];
       return {
+        faction_id: fid,
         torn_war_id: w.id,
         opponent_id: them?.id ?? null,
         opponent_name: them?.name ?? "unknown",
@@ -848,26 +892,24 @@ async function syncWars(
         updated_at: new Date().toISOString(),
       };
     });
-    if (rows.length) await db.from("wars").upsert(rows, { onConflict: "torn_war_id" });
+    if (rows.length) {
+      await db.from("wars").upsert(rows, { onConflict: "faction_id,torn_war_id" });
+    }
   } catch (e) {
-    console.error("war sync failed:", e);
+    console.error(`[${fid}] war sync failed:`, e);
   }
 }
 
 /**
  * Once a war ends, Torn's ranked war report gives the AUTHORITATIVE per-member
  * war-hit count — including war hits that were never part of a chain, which the
- * chain reports miss. Pulled once per ended war; failures just retry next pass
- * (the endpoint is public + stable, so this stays cheap).
+ * chain reports miss. Pulled once per ended war; failures just retry next pass.
  */
-async function syncWarReports(
-  db: SupabaseClient,
-  torn: TornClient,
-  factionId: number,
-): Promise<void> {
+async function syncWarReports(db: SupabaseClient, torn: TornClient, fid: number): Promise<void> {
   const { data: pending } = await db
     .from("wars")
     .select("torn_war_id")
+    .eq("faction_id", fid)
     .eq("report_synced", false)
     .not("ended_at", "is", null)
     .order("ended_at", { ascending: false })
@@ -877,32 +919,38 @@ async function syncWarReports(
   for (const row of pending) {
     try {
       const report = await torn.rankedWarReport(row.torn_war_id);
-      const ours = report.factions?.find((f) => f.id === factionId);
+      const ours = report.factions?.find((f) => f.id === fid);
       if (ours?.members?.length) {
         await db.from("war_contributions").upsert(
           ours.members.map((mem) => ({
+            faction_id: fid,
             torn_war_id: row.torn_war_id,
             member_id: mem.id,
             war_hits: mem.attacks,
             war_score: mem.score,
           })),
-          { onConflict: "torn_war_id,member_id" },
+          { onConflict: "faction_id,torn_war_id,member_id" },
         );
-        // name everyone who fought, even members who never signed into ChainWatch
+        // name everyone who fought, even members who never signed in
         await db.from("roster").upsert(
           ours.members.map((mem) => ({
+            faction_id: fid,
             torn_id: mem.id,
             name: mem.name,
             updated_at: new Date().toISOString(),
           })),
-          { onConflict: "torn_id" },
+          { onConflict: "faction_id,torn_id" },
         );
       }
-      await db.from("wars").update({ report_synced: true }).eq("torn_war_id", row.torn_war_id);
+      await db
+        .from("wars")
+        .update({ report_synced: true })
+        .eq("faction_id", fid)
+        .eq("torn_war_id", row.torn_war_id);
     } catch (e) {
       // leave report_synced=false so it retries; don't hammer on rate limits
       if (isRateLimitError(e)) return;
-      console.error(`war report ${row.torn_war_id} failed:`, e);
+      console.error(`[${fid}] war report ${row.torn_war_id} failed:`, e);
     }
   }
 }
@@ -912,10 +960,11 @@ async function syncWarReports(
  * attacks, overseas, bonus hits, respect). Pulled a few at a time so a backlog
  * never blows the cycle budget.
  */
-async function syncChainReports(db: SupabaseClient, torn: TornClient): Promise<void> {
+async function syncChainReports(db: SupabaseClient, fid: number, torn: TornClient): Promise<void> {
   const { data: pending } = await db
     .from("chains")
     .select("torn_chain_id")
+    .eq("faction_id", fid)
     .eq("report_synced", false)
     .not("ended_at", "is", null)
     .order("ended_at", { ascending: false })
@@ -923,9 +972,23 @@ async function syncChainReports(db: SupabaseClient, torn: TornClient): Promise<v
   if (!pending?.length) return;
 
   for (const row of pending) {
+    const markSynced = () =>
+      db
+        .from("chains")
+        .update({ report_synced: true })
+        .eq("faction_id", fid)
+        .eq("torn_chain_id", row.torn_chain_id);
     try {
       const report = await torn.chainReport(row.torn_chain_id);
+      // a chain id belongs to exactly one faction; never file another
+      // faction's report under ours
+      if (report.faction_id && report.faction_id !== fid) {
+        console.error(`[${fid}] chain ${row.torn_chain_id} belongs to ${report.faction_id}`);
+        await markSynced();
+        continue;
+      }
       const contributions = (report.attackers ?? []).map((a) => ({
+        faction_id: fid,
         torn_chain_id: row.torn_chain_id,
         member_id: a.id,
         attacks_total: a.attacks.total,
@@ -939,11 +1002,12 @@ async function syncChainReports(db: SupabaseClient, torn: TornClient): Promise<v
       if (contributions.length) {
         await db
           .from("chain_contributions")
-          .upsert(contributions, { onConflict: "torn_chain_id,member_id" });
+          .upsert(contributions, { onConflict: "faction_id,torn_chain_id,member_id" });
       }
       // per-milestone bonus respect (50th/100th/250th/… hits) so the payout can
       // strip that inflated respect back out
       const bonusRows = (report.bonuses ?? []).map((b) => ({
+        faction_id: fid,
         torn_chain_id: row.torn_chain_id,
         chain_count: b.chain,
         member_id: b.attacker_id,
@@ -952,20 +1016,14 @@ async function syncChainReports(db: SupabaseClient, torn: TornClient): Promise<v
       if (bonusRows.length) {
         await db
           .from("chain_bonuses")
-          .upsert(bonusRows, { onConflict: "torn_chain_id,chain_count" });
+          .upsert(bonusRows, { onConflict: "faction_id,torn_chain_id,chain_count" });
       }
-      await db
-        .from("chains")
-        .update({ report_synced: true })
-        .eq("torn_chain_id", row.torn_chain_id);
+      await markSynced();
     } catch (e) {
       // a Limited key may not be allowed to read chain reports — don't retry
       // this chain forever, just move on
-      console.error(`chain report ${row.torn_chain_id} failed:`, e);
-      await db
-        .from("chains")
-        .update({ report_synced: true })
-        .eq("torn_chain_id", row.torn_chain_id);
+      console.error(`[${fid}] chain report ${row.torn_chain_id} failed:`, e);
+      await markSynced();
     }
   }
 }
@@ -987,15 +1045,17 @@ function toShiftLites(shifts: ActiveShiftRow[]): ShiftLite[] {
  */
 async function syncAvailability(
   db: SupabaseClient,
+  fid: number,
   activeShifts: ActiveShiftRow[],
   torn: TornClient,
+  abroadOnly: boolean,
 ): Promise<ActiveShiftRow[]> {
   if (activeShifts.length === 0) return activeShifts;
   let roster;
   try {
-    roster = await torn.factionMembers();
+    roster = await torn.factionMembers(fid);
   } catch (e) {
-    console.error("availability check failed:", e);
+    console.error(`[${fid}] availability check failed:`, e);
     return activeShifts; // keep last known state rather than guessing
   }
   const infoById = new Map(roster.map((m) => [m.id, m.status ?? null]));
@@ -1023,9 +1083,10 @@ async function syncAvailability(
       ? parseTravelDest(status?.description, status?.details)
       : null;
 
-    // Heading home to Torn = done saving for this trip: end the shift now so the
-    // slot frees up immediately (4/4 -> 3/4) instead of lingering as "can't save".
-    if (traveling && travelDest === "Torn") {
+    // Abroad-only factions: heading home to Torn = done saving for this trip.
+    // End the shift now so the slot frees up immediately (4/4 -> 3/4) instead
+    // of lingering as "can't save".
+    if (abroadOnly && traveling && travelDest === "Torn") {
       await db
         .from("shifts")
         .update({ ended_at: nowIso, end_reason: "returning_home" })
@@ -1093,11 +1154,12 @@ async function syncAvailability(
 }
 
 /**
- * Content-free nudge on the public Realtime channel. Clients react by
+ * Content-free nudge on the faction's Realtime channel. Clients react by
  * re-fetching the authenticated /api/state, so a forged broadcast can waste a
- * fetch but can never spoof chain state, and the channel leaks nothing.
+ * fetch but can never spoof chain state, and the channel leaks nothing. The
+ * topic is a per-faction random name, handed only to that faction's members.
  */
-async function pokeClients(): Promise<void> {
+async function pokeClients(topic: string): Promise<void> {
   const url = Deno.env.get("SUPABASE_URL")!;
   const key = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
   try {
@@ -1109,7 +1171,7 @@ async function pokeClients(): Promise<void> {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        messages: [{ topic: "chain", event: "poke", payload: {}, private: false }],
+        messages: [{ topic, event: "poke", payload: {}, private: false }],
       }),
       signal: AbortSignal.timeout(5_000),
     });

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { sessionMember, unauthorized } from "@/lib/session";
+import { requireMember } from "@/lib/session";
 import type { ShiftRow } from "@/lib/types";
 
 // POST = "skip my turn": stamp deprioritized_at=now on the caller's active
@@ -9,8 +9,9 @@ import type { ShiftRow } from "@/lib/types";
 // save — no pay or stat credit, and they keep their shift. Repeated taps just
 // refresh the timestamp.
 export async function POST() {
-  const member = await sessionMember();
-  if (!member) return unauthorized();
+  const auth = await requireMember();
+  if (auth.error) return auth.error;
+  const { member, fid } = auth.ctx;
 
   const { data: shift, error } = await db()
     .from("shifts")

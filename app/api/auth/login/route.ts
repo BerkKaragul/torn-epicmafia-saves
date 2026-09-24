@@ -4,11 +4,6 @@ import { encryptKey } from "@/lib/crypto";
 import { createSessionCookie } from "@/lib/session";
 import { TornApiError, tornClient } from "@/lib/torn";
 
-// Uniform for bad key AND wrong faction, so the endpoint can't be used as a
-// key-validity / faction-membership oracle.
-const GENERIC_FAIL =
-  "Couldn't verify that key for this faction — check the key and try again.";
-
 async function rateLimited(ip: string): Promise<boolean> {
   const since = new Date(Date.now() - 10 * 60 * 1000).toISOString();
   const { count } = await db()
@@ -20,6 +15,9 @@ async function rateLimited(ip: string): Promise<boolean> {
   return (count ?? 0) >= 15;
 }
 
+// Any member of any faction can sign in. The first login from a faction
+// registers it (and grants the platform's free trial, if one is configured);
+// whether the faction can actually USE the app is decided by its subscription.
 export async function POST(req: Request) {
   const ip = (req.headers.get("x-forwarded-for") ?? "unknown").split(",")[0].trim();
   if (await rateLimited(ip)) {
@@ -45,13 +43,6 @@ export async function POST(req: Request) {
   const torn = tornClient(key);
 
   try {
-    const { data: settings } = await db()
-      .from("settings")
-      .select("faction_id, poller_member_id")
-      .eq("id", 1)
-      .single();
-    if (!settings) throw new Error("settings row missing");
-
     const info = await torn.keyInfo();
     // user/attacks needs Limited+; a Custom key qualifies if it has the selection
     if (!info.selections?.user?.includes("attacks")) {
@@ -64,25 +55,49 @@ export async function POST(req: Request) {
       );
     }
 
-    const faction = await torn.factionBasic();
-    if (faction.id !== settings.faction_id) {
-      return NextResponse.json({ error: GENERIC_FAIL }, { status: 400 });
+    const [profile, faction] = await Promise.all([torn.userBasic(), torn.factionBasic()]);
+    if (!faction?.id) {
+      return NextResponse.json(
+        { error: "You need to be in a faction to use ChainWatch." },
+        { status: 400 },
+      );
     }
 
-    const profile = await torn.userBasic();
+    // register the faction on first sight; refresh its name/tag otherwise
+    const { error: facErr } = await db().rpc("ensure_faction", {
+      p_faction: faction.id,
+      p_name: faction.name,
+      p_tag: faction.tag,
+    });
+    if (facErr) throw facErr;
+    const { data: trial } = await db().rpc("grant_trial", { p_faction: faction.id });
+
     const { ct, iv } = await encryptKey(key);
     const isLeader = profile.id === faction.leader_id || profile.id === faction.co_leader_id;
 
     const { data: existing } = await db()
       .from("members")
-      .select("is_admin, admin_source")
+      .select("faction_id, is_admin, admin_source")
       .eq("torn_id", profile.id)
       .maybeSingle();
+    // admin rights belong to a faction: a member who moved starts fresh
+    const sameFaction = existing?.faction_id === faction.id;
+    const keptAdmin = sameFaction ? (existing?.is_admin ?? false) : false;
+    const keptSource = sameFaction ? (existing?.admin_source ?? null) : null;
+
+    if (existing && !sameFaction) {
+      await db()
+        .from("shifts")
+        .update({ ended_at: new Date().toISOString(), end_reason: "left_faction" })
+        .eq("member_id", profile.id)
+        .is("ended_at", null);
+    }
 
     const { error: upsertErr } = await db()
       .from("members")
       .upsert({
         torn_id: profile.id,
+        faction_id: faction.id,
         name: profile.name,
         api_key_ct: ct,
         api_key_iv: iv,
@@ -90,22 +105,27 @@ export async function POST(req: Request) {
         key_valid: true,
         rate_limited_until: null,
         // leaders are always admins; never downgrade an existing granted admin
-        is_admin: isLeader || existing?.is_admin || false,
-        admin_source: isLeader ? "auto" : (existing?.admin_source ?? null),
+        is_admin: isLeader || keptAdmin,
+        admin_source: isLeader ? "auto" : keptSource,
         last_login_at: new Date().toISOString(),
       });
     if (upsertErr) throw upsertErr;
 
     // keep leadership + a default poller key up to date
+    const { data: settings } = await db()
+      .from("settings")
+      .select("poller_member_id")
+      .eq("faction_id", faction.id)
+      .single();
     await db()
       .from("settings")
       .update({
         leader_id: faction.leader_id,
         co_leader_id: faction.co_leader_id,
-        poller_member_id: settings.poller_member_id ?? profile.id,
+        poller_member_id: settings?.poller_member_id ?? profile.id,
         updated_at: new Date().toISOString(),
       })
-      .eq("id", 1);
+      .eq("faction_id", faction.id);
 
     await createSessionCookie(profile.id);
     return NextResponse.json({
@@ -113,8 +133,9 @@ export async function POST(req: Request) {
       member: {
         torn_id: profile.id,
         name: profile.name,
-        is_admin: isLeader || existing?.is_admin || false,
+        is_admin: isLeader || keptAdmin,
       },
+      trial_started: Boolean(trial?.faction_id),
     });
   } catch (e) {
     if (e instanceof TornApiError) {
@@ -122,7 +143,7 @@ export async function POST(req: Request) {
         e.code === 5
           ? "Torn rate limit hit — wait a minute and try again."
           : e.code === 2
-            ? GENERIC_FAIL
+            ? "Torn says that key is incorrect — check it and try again."
             : `Torn API error: ${e.message}`;
       return NextResponse.json({ error: friendly }, { status: 400 });
     }

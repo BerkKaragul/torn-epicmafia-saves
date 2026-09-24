@@ -33,8 +33,10 @@ interface Me {
     observed_at: number;
   };
   alert_threshold_s: number;
+  realtime_topic: string;
   unavailable_state: string | null;
   abroad: boolean;
+  abroad_only: boolean;
   missed_turns: number;
   slots: { cap: number; active: number };
 }
@@ -76,17 +78,24 @@ export function DutyPanel() {
     const t = setInterval(() => setNowTick(Date.now()), 500);
     // refresh billable totals + live chain state periodically
     const r = setInterval(load, 20_000);
-    // ...and immediately whenever the poller says something changed
-    const channel = supabaseBrowser()
-      ?.channel("chain")
-      .on("broadcast", { event: "poke" }, () => load())
-      .subscribe();
     return () => {
       clearInterval(t);
       clearInterval(r);
-      channel?.unsubscribe();
     };
   }, [load]);
+
+  // ...and immediately whenever the poller pokes this faction's channel
+  const realtimeTopic = me?.realtime_topic;
+  useEffect(() => {
+    if (!realtimeTopic) return;
+    const channel = supabaseBrowser()
+      ?.channel(realtimeTopic)
+      .on("broadcast", { event: "poke" }, () => load())
+      .subscribe();
+    return () => {
+      channel?.unsubscribe();
+    };
+  }, [realtimeTopic, load]);
 
   async function togglePush() {
     setPushError(null);
@@ -301,7 +310,7 @@ export function DutyPanel() {
         </section>
       )}
 
-      {shift && !me.unavailable_state && !me.abroad && (
+      {shift && me.abroad_only && !me.unavailable_state && !me.abroad && (
         <section className="rounded-xl border border-amber-700 bg-amber-950/40 p-4">
           <p className="font-bold text-amber-300">
             🏙 You&apos;re in the home city — no pay is accruing
@@ -495,7 +504,7 @@ export function DutyPanel() {
       </section>
 
       <section className="rounded-xl border border-neutral-800 bg-neutral-900 p-6">
-        <h2 className="text-lg font-bold">Owed to you (unpaid)</h2>
+        <h2 className="text-lg font-bold">Your saver earnings</h2>
         <p className="mt-1 text-xs text-neutral-500">
           Availability pay counts only time a chain was actually live — dead peacetime while
           you&apos;re enlisted doesn&apos;t pay.

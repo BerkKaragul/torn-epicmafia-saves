@@ -6,6 +6,6 @@ import { db } from "@/lib/db";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const { error } = await db().from("settings").select("id").eq("id", 1).single();
+  const { error } = await db().from("platform_config").select("id").eq("id", 1).single();
   return NextResponse.json({ ok: !error, at: new Date().toISOString() });
 }

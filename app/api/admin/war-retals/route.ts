@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { forbidden, sessionMember, unauthorized } from "@/lib/session";
+import { requireMember } from "@/lib/session";
 import { decryptKey } from "@/lib/crypto";
 import { isRateLimitError, TornApiError, tornClient, type TornAttack } from "@/lib/torn";
 
@@ -42,9 +42,9 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 // stores them for that war. Uses the calling admin's own key (must have faction
 // API access).
 export async function POST(req: Request) {
-  const member = await sessionMember();
-  if (!member) return unauthorized();
-  if (!member.is_admin) return forbidden();
+  const auth = await requireMember({ admin: true });
+  if (auth.error) return auth.error;
+  const { member, fid } = auth.ctx;
 
   let warId: number;
   try {
@@ -59,18 +59,15 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "No API key on your account — log in again." }, { status: 400 });
   }
 
-  const [{ data: war }, { data: settings }] = await Promise.all([
-    db()
-      .from("wars")
-      .select("torn_war_id, opponent_id, started_at, ended_at")
-      .eq("torn_war_id", warId)
-      .maybeSingle(),
-    db().from("settings").select("faction_id").eq("id", 1).single(),
-  ]);
+  const { data: war } = await db()
+    .from("wars")
+    .select("torn_war_id, opponent_id, started_at, ended_at")
+    .eq("faction_id", fid)
+    .eq("torn_war_id", warId)
+    .maybeSingle();
   if (!war) return NextResponse.json({ error: "War not found" }, { status: 404 });
-  if (!settings) return NextResponse.json({ error: "Settings missing" }, { status: 500 });
 
-  const ourFaction = Number(settings.faction_id);
+  const ourFaction = fid;
   const opponent = Number(war.opponent_id);
   if (!opponent) {
     return NextResponse.json({ error: "No opponent recorded for this war yet." }, { status: 400 });
@@ -159,8 +156,9 @@ export async function POST(req: Request) {
   }
 
   // replace this war's stored counts with the fresh tally
-  await db().from("war_retals").delete().eq("torn_war_id", warId);
+  await db().from("war_retals").delete().eq("faction_id", fid).eq("torn_war_id", warId);
   const rows = [...tally.entries()].map(([member_id, t]) => ({
+    faction_id: fid,
     torn_war_id: warId,
     member_id,
     retals: t.retals,
@@ -175,7 +173,11 @@ export async function POST(req: Request) {
     }
   }
   // mark the war so these faction-attacks counts become authoritative
-  await db().from("wars").update({ retals_synced: true }).eq("torn_war_id", warId);
+  await db()
+    .from("wars")
+    .update({ retals_synced: true })
+    .eq("faction_id", fid)
+    .eq("torn_war_id", warId);
 
   return NextResponse.json({
     ok: true,

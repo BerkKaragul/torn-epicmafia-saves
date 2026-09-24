@@ -30,6 +30,8 @@ export function LiveChain({ initial, myId }: { initial: StatePayload; myId: numb
   // Realtime "poke" → re-fetch the authenticated /api/state. The public
   // channel carries no data, so a forged broadcast can waste a fetch but can
   // never spoof chain state; the 30s poll runs only while the socket is down.
+  // the faction's own channel; fixed for the life of the page
+  const realtimeTopic = initial.realtime_topic;
   const channelUp = useRef(false);
   useEffect(() => {
     let refetchTimer: ReturnType<typeof setTimeout> | null = null;
@@ -55,7 +57,7 @@ export function LiveChain({ initial, myId }: { initial: StatePayload; myId: numb
 
     const sb = supabaseBrowser();
     const channel = sb
-      ?.channel("chain")
+      ?.channel(realtimeTopic)
       .on("broadcast", { event: "poke" }, debouncedFetch)
       .subscribe((status) => {
         channelUp.current = status === "SUBSCRIBED";
@@ -74,7 +76,7 @@ export function LiveChain({ initial, myId }: { initial: StatePayload; myId: numb
       if (refetchTimer) clearTimeout(refetchTimer);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, []);
+  }, [realtimeTopic]);
 
   // 4 fps local tick keeps the countdown smooth between polls
   useEffect(() => {
@@ -100,7 +102,7 @@ export function LiveChain({ initial, myId }: { initial: StatePayload; myId: numb
   useEffect(() => {
     document.title = chainActive
       ? `(${fmtClock(remaining)}) ${state.chain.current} CHAIN`
-      : "ChainWatch — EPIC Mafia";
+      : "ChainWatch";
   }, [chainActive, remaining, state.chain.current]);
 
   // danger siren (armed by the user toggle — browsers require a gesture).

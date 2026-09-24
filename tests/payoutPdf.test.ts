@@ -61,7 +61,7 @@ describe("unitRateLine", () => {
 describe("payoutPdfName", () => {
   test("turns an opponent into a safe filename", () => {
     expect(payoutPdfName("Monarch Contagion")).toBe("war-payout-Monarch-Contagion.pdf");
-    expect(payoutPdfName("[40959] Epic!")).toBe("war-payout-40959-Epic.pdf");
+    expect(payoutPdfName("[12345] Some Faction!")).toBe("war-payout-12345-Some-Faction.pdf");
     expect(payoutPdfName("???")).toBe("war-payout-war.pdf");
   });
 });

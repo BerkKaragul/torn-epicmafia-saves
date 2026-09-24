@@ -34,23 +34,31 @@ export interface StatePayload {
   alert_threshold_s: number;
   saver_cap: number;
   faction_id: number;
+  /** this faction's Realtime channel (the poller pokes it on every change) */
+  realtime_topic: string;
   poller_at: number | null;
 }
 
 /** Same shape the poller broadcasts — used for SSR and as polling fallback. */
-export async function buildStatePayload(): Promise<StatePayload> {
+export async function buildStatePayload(faction: {
+  faction_id: number;
+  realtime_topic: string;
+}): Promise<StatePayload> {
+  const fid = faction.faction_id;
   const [{ data: state }, { data: settings }, { data: shifts }, { data: lastSave }] =
     await Promise.all([
-      db().from("poller_state").select("*").eq("id", 1).maybeSingle(),
-      db().from("settings").select("*").eq("id", 1).single<SettingsRow>(),
+      db().from("poller_state").select("*").eq("faction_id", fid).maybeSingle(),
+      db().from("settings").select("*").eq("faction_id", fid).single<SettingsRow>(),
       db()
         .from("shifts")
         .select("*, members!inner(name)")
+        .eq("faction_id", fid)
         .is("ended_at", null)
         .returns<(ShiftRow & { members: { name: string } })[]>(),
       db()
         .from("saves")
         .select("chain_count, member_id, remaining_at_hit_s, hit_registered_at, status")
+        .eq("faction_id", fid)
         .in("status", ["confirmed", "unattributed"])
         .order("detected_at", { ascending: false })
         .limit(1)
@@ -97,7 +105,8 @@ export async function buildStatePayload(): Promise<StatePayload> {
     last_save: (lastSave as StatePayload["last_save"]) ?? null,
     alert_threshold_s: settings?.alert_threshold_s ?? 90,
     saver_cap: settings?.saver_cap ?? 0,
-    faction_id: settings?.faction_id ?? 0,
+    faction_id: fid,
+    realtime_topic: faction.realtime_topic,
     poller_at: state?.last_poll_at ? toS(state.last_poll_at) : null,
   };
 }

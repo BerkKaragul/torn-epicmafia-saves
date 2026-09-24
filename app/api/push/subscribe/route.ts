@@ -1,10 +1,11 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { sessionMember, unauthorized } from "@/lib/session";
+import { requireMember } from "@/lib/session";
 
 export async function POST(req: Request) {
-  const member = await sessionMember();
-  if (!member) return unauthorized();
+  const auth = await requireMember();
+  if (auth.error) return auth.error;
+  const { member, fid } = auth.ctx;
 
   let sub: { endpoint?: string; keys?: { p256dh?: string; auth?: string } };
   try {
@@ -38,8 +39,9 @@ export async function POST(req: Request) {
 }
 
 export async function DELETE(req: Request) {
-  const member = await sessionMember();
-  if (!member) return unauthorized();
+  const auth = await requireMember();
+  if (auth.error) return auth.error;
+  const { member, fid } = auth.ctx;
   let endpoint: string | undefined;
   try {
     ({ endpoint } = await req.json());

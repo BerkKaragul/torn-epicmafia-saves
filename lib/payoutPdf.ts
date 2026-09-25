@@ -133,6 +133,19 @@ export async function buildPayoutPdf(input: PayoutPdfInput) {
   const rates = unitRateLine(totals);
   if (rates) doc.text(pdfSafe(`~ ${rates}`), pageW - 40, 88, { align: "right" });
 
+  // what one of each action earned — the same estimate the web shows, up top
+  // because it's what most members open the PDF to find
+  let tableY = rates ? 104 : 92;
+  const perAction = actionLine(lines, config);
+  if (perAction) {
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(8.5);
+    doc.setTextColor(16, 122, 76);
+    doc.text(pdfSafe(perAction), 40, tableY + 2, { maxWidth: pageW - 80 });
+    doc.setFont("helvetica", "normal");
+    tableY += 16;
+  }
+
   const showOutside = config.includeOutside;
   const head = [
     [
@@ -168,7 +181,7 @@ export async function buildPayoutPdf(input: PayoutPdfInput) {
   autoTable(doc, {
     head,
     body,
-    startY: rates ? 104 : 92,
+    startY: tableY,
     margin: { left: 40, right: 40 },
     styles: { fontSize: 8, cellPadding: 4, lineColor: [225, 225, 225], lineWidth: 0.5 },
     headStyles: { fillColor: [38, 38, 38], textColor: 255, fontStyle: "bold" },
@@ -202,17 +215,7 @@ export async function buildPayoutPdf(input: PayoutPdfInput) {
   // re-derived or argued with
   const afterTable =
     (doc as unknown as { lastAutoTable?: { finalY: number } }).lastAutoTable?.finalY ?? 92;
-  let noteY = Math.min(afterTable + 18, doc.internal.pageSize.getHeight() - 36);
-
-  // what one of each action earned — the same estimate the web shows
-  const perAction = actionLine(lines, config);
-  if (perAction) {
-    doc.setFontSize(8);
-    doc.setTextColor(40);
-    doc.text(pdfSafe(perAction), 40, noteY, { maxWidth: pageW - 80 });
-    noteY += 14;
-  }
-
+  const noteY = Math.min(afterTable + 18, doc.internal.pageSize.getHeight() - 24);
   doc.setFontSize(7.5);
   doc.setTextColor(130);
   doc.text(

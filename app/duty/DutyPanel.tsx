@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { currentPushStatus, disablePush, enablePush, type PushStatus } from "./push";
 import { fmtClock, fmtDuration, fmtMoney } from "@/lib/format";
@@ -22,7 +23,17 @@ interface Me {
     eligible_savers: number;
   } | null;
   saving_enabled: boolean;
-  unpaid: { duty_seconds: number; hours_amount: number; save_count: number; saves_amount: number };
+  // this member's tally for the war in progress; null between wars
+  war: {
+    torn_war_id: number;
+    opponent_name: string | null;
+    started_at: string;
+    duty_seconds: number;
+    hours_amount: number;
+    save_count: number;
+    saves_amount: number;
+    missed_turns: number;
+  } | null;
   chain_active: boolean;
   chain: {
     id: number;
@@ -35,7 +46,6 @@ interface Me {
   alert_threshold_s: number;
   unavailable_state: string | null;
   abroad: boolean;
-  missed_turns: number;
   slots: { cap: number; active: number };
 }
 
@@ -495,50 +505,67 @@ export function DutyPanel() {
       </section>
 
       <section className="rounded-xl border border-neutral-800 bg-neutral-900 p-6">
-        <h2 className="text-lg font-bold">Owed to you (unpaid)</h2>
-        <p className="mt-1 text-xs text-neutral-500">
-          Availability pay counts only time a chain was actually live — dead peacetime while
-          you&apos;re enlisted doesn&apos;t pay.
-        </p>
-        <div className="mt-3 grid grid-cols-2 gap-4 sm:grid-cols-4">
-          <div>
-            <p className="text-2xl font-bold tabular-nums">
-              {fmtDuration(me.unpaid.duty_seconds)}
+        <h2 className="text-lg font-bold">
+          This war{me.war?.opponent_name ? ` vs ${me.war.opponent_name}` : ""}
+        </h2>
+        {!me.war ? (
+          <p className="mt-1 text-sm text-neutral-400">
+            No war running. Past wars are paid from the war payout — see{" "}
+            <Link href="/payouts" className="underline hover:text-neutral-200">
+              Payouts
+            </Link>
+            .
+          </p>
+        ) : (
+          <>
+            <p className="mt-1 text-xs text-neutral-500">
+              Running tally for this war, paid with the war payout when it ends. Availability pay
+              counts only time a chain was actually live — dead peacetime while you&apos;re
+              enlisted doesn&apos;t pay.
             </p>
-            <p className="text-xs text-neutral-500">paid on-chain time</p>
-          </div>
-          <div>
-            <p className="text-2xl font-bold tabular-nums">{fmtMoney(me.unpaid.hours_amount)}</p>
-            <p className="text-xs text-neutral-500">for availability</p>
-          </div>
-          <div>
-            <p className="text-2xl font-bold tabular-nums">{me.unpaid.save_count}</p>
-            <p className="text-xs text-neutral-500">saves confirmed</p>
-          </div>
-          <div>
-            {(me.rates?.per_save_bonus ?? 0) > 0 ? (
-              <>
+            <div className="mt-3 grid grid-cols-2 gap-4 sm:grid-cols-4">
+              <div>
                 <p className="text-2xl font-bold tabular-nums">
-                  {fmtMoney(me.unpaid.saves_amount)}
+                  {fmtDuration(me.war.duty_seconds)}
                 </p>
-                <p className="text-xs text-neutral-500">for saves</p>
-              </>
-            ) : (
-              <>
-                <p className="text-lg font-bold text-amber-300">war reward</p>
-                <p className="text-xs text-neutral-500">save bonus paid from it</p>
-              </>
-            )}
-          </div>
-          <div>
-            <p
-              className={`text-2xl font-bold tabular-nums ${me.missed_turns > 0 ? "text-red-400" : ""}`}
-            >
-              {me.missed_turns}
-            </p>
-            <p className="text-xs text-neutral-500">chains lost on your turn</p>
-          </div>
-        </div>
+                <p className="text-xs text-neutral-500">paid on-chain time</p>
+              </div>
+              <div>
+                <p className="text-2xl font-bold tabular-nums">
+                  {fmtMoney(me.war.hours_amount)}
+                </p>
+                <p className="text-xs text-neutral-500">for availability</p>
+              </div>
+              <div>
+                <p className="text-2xl font-bold tabular-nums">{me.war.save_count}</p>
+                <p className="text-xs text-neutral-500">saves confirmed</p>
+              </div>
+              <div>
+                {(me.rates?.per_save_bonus ?? 0) > 0 ? (
+                  <>
+                    <p className="text-2xl font-bold tabular-nums">
+                      {fmtMoney(me.war.saves_amount)}
+                    </p>
+                    <p className="text-xs text-neutral-500">for saves</p>
+                  </>
+                ) : (
+                  <>
+                    <p className="text-lg font-bold text-amber-300">war reward</p>
+                    <p className="text-xs text-neutral-500">save bonus paid from it</p>
+                  </>
+                )}
+              </div>
+              <div>
+                <p
+                  className={`text-2xl font-bold tabular-nums ${me.war.missed_turns > 0 ? "text-red-400" : ""}`}
+                >
+                  {me.war.missed_turns}
+                </p>
+                <p className="text-xs text-neutral-500">chains lost on your turn</p>
+              </div>
+            </div>
+          </>
+        )}
       </section>
     </div>
   );

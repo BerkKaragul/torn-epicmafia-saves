@@ -4,6 +4,73 @@ import { sessionMember, unauthorized } from "@/lib/session";
 import { perSaverHourlyRate } from "@/supabase/functions/_shared/logic/pay";
 import type { SaveRow, SettingsRow, ShiftRow } from "@/lib/types";
 
+interface WarTally {
+  torn_war_id: number;
+  opponent_name: string | null;
+  started_at: string;
+  duty_seconds: number;
+  hours_amount: number;
+  save_count: number;
+  saves_amount: number;
+  missed_turns: number;
+}
+
+/**
+ * The member's running tally for the war in progress — the same window and
+ * overlap rules war_report uses, so it previews that war's chain_pay and saves.
+ * Once the war ends it's paid from the war payout, so there's nothing to show
+ * until the next one starts.
+ */
+async function currentWarTally(memberId: number): Promise<WarTally | null> {
+  const { data: war } = await db()
+    .from("wars")
+    .select("torn_war_id, opponent_name, started_at")
+    .is("ended_at", null)
+    .order("started_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (!war) return null;
+
+  const from = war.started_at as string;
+  const to = new Date().toISOString();
+  const [{ data: shifts }, { data: saves }, { count: missed }] = await Promise.all([
+    db()
+      .from("shifts")
+      .select("billable_seconds, earned_amount")
+      .eq("member_id", memberId)
+      .lt("started_at", to)
+      .or(`ended_at.is.null,ended_at.gt.${from}`),
+    db()
+      .from("saves")
+      .select("bonus_snapshot")
+      .eq("member_id", memberId)
+      .eq("status", "confirmed")
+      .gte("detected_at", from)
+      .lte("detected_at", to)
+      .returns<Pick<SaveRow, "bonus_snapshot">[]>(),
+    db()
+      .from("missed_turns")
+      .select("id", { count: "exact", head: true })
+      .eq("member_id", memberId)
+      .gte("occurred_at", from),
+  ]);
+
+  return {
+    torn_war_id: Number(war.torn_war_id),
+    opponent_name: war.opponent_name ?? null,
+    started_at: from,
+    duty_seconds: (shifts ?? []).reduce((sum, s) => sum + Number(s.billable_seconds ?? 0), 0),
+    hours_amount: Math.round(
+      (shifts ?? []).reduce((sum, s) => sum + Number(s.earned_amount ?? 0), 0),
+    ),
+    save_count: (saves ?? []).length,
+    saves_amount: Math.round(
+      (saves ?? []).reduce((sum, s) => sum + Number(s.bonus_snapshot ?? 0), 0),
+    ),
+    missed_turns: missed ?? 0,
+  };
+}
+
 export async function GET() {
   const member = await sessionMember();
   if (!member) return unauthorized();
@@ -11,9 +78,7 @@ export async function GET() {
   const [
     { data: activeShift },
     { data: settings },
-    { data: unpaidDuty },
-    { data: mySaves },
-    { count: missedTurns },
+    war,
     { count: activeSavers },
     { count: eligibleSavers },
     { data: pollerState },
@@ -25,19 +90,7 @@ export async function GET() {
         .is("ended_at", null)
         .maybeSingle<ShiftRow>(),
       db().from("settings").select("*").eq("id", 1).single<SettingsRow>(),
-      // billable = only time a chain was live during the member's unpaid shifts
-      db().rpc("member_unpaid_duty", { p_member: member.torn_id }),
-      db()
-        .from("saves")
-        .select("*")
-        .eq("member_id", member.torn_id)
-        .eq("status", "confirmed")
-        .is("payout_line_id", null)
-        .returns<SaveRow[]>(),
-      db()
-        .from("missed_turns")
-        .select("id", { count: "exact", head: true })
-        .eq("member_id", member.torn_id),
+      currentWarTally(member.torn_id),
       db().from("shifts").select("id", { count: "exact", head: true }).is("ended_at", null),
       // savers actually earning right now: on duty, not blocked, and abroad
       // (home-city time doesn't earn) — this drives the live per-saver split
@@ -54,11 +107,6 @@ export async function GET() {
         .maybeSingle(),
     ]);
 
-  const duty = (unpaidDuty ?? { duty_seconds: 0, hours_amount: 0 }) as {
-    duty_seconds: number;
-    hours_amount: number;
-  };
-  const savesAmount = (mySaves ?? []).reduce((sum, s) => sum + Number(s.bonus_snapshot ?? 0), 0);
   const chainActive =
     (pollerState?.last_chain_id ?? 0) > 0 &&
     (pollerState?.last_current ?? 0) > 0 &&
@@ -87,12 +135,7 @@ export async function GET() {
         }
       : null,
     saving_enabled: settings?.saving_enabled ?? true,
-    unpaid: {
-      duty_seconds: Number(duty.duty_seconds),
-      hours_amount: Number(duty.hours_amount),
-      save_count: (mySaves ?? []).length,
-      saves_amount: Math.round(savesAmount),
-    },
+    war,
     chain_active: chainActive,
     chain: {
       id: pollerState?.last_chain_id ?? 0,
@@ -107,7 +150,6 @@ export async function GET() {
     alert_threshold_s: settings?.alert_threshold_s ?? 90,
     unavailable_state: activeShift?.unavailable_state ?? null,
     abroad: activeShift?.abroad ?? false,
-    missed_turns: missedTurns ?? 0,
     slots: { cap: settings?.saver_cap ?? 0, active: activeSavers ?? 0 },
   });
 }

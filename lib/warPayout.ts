@@ -197,3 +197,56 @@ export function normalizeConfig(raw: unknown): WarPayoutConfig {
     includeOutside: Boolean(o.includeOutside),
   };
 }
+
+export interface ActionValues {
+  /** respect an average war hit earned in this war */
+  respectPerHit: number;
+  /** what one average war hit took from the split (hit pool + its respect) */
+  hit: number;
+  save: number;
+  assist: number;
+  /** fixed retal pay, paid on top of the hit itself */
+  retal: number;
+  /** null when outside hits weren't paid */
+  outside: number | null;
+}
+
+/**
+ * "What was one hit / save / assist worth?" for a frozen war — an illustration
+ * for members, not part of the payout. An average war hit earns hitPerUnit from
+ * the hit pool plus (its average respect × respectPerUnit) from the respect
+ * pool; saves and assists are fictional hits by construction, so their values
+ * are the same formula with their factors. Real hits differ from the average by
+ * how much respect each one actually scored.
+ *
+ * Re-derived from the frozen lines rather than stored totals, so it works for
+ * every published war: rows dropped from a snapshot had nothing in either pool,
+ * so rerunning the split on the lines gives the same per-unit rates.
+ */
+export function actionValues(lines: WarPayoutRow[], config: WarPayoutConfig): ActionValues {
+  const report: WarReportRow[] = lines.map((l) => ({
+    member_id: l.member_id,
+    name: l.name,
+    respect: l.respect,
+    war_hits: l.war_hits,
+    outside_hits: l.outside_hits,
+    retaliations: l.retaliations,
+    assists: l.assists,
+    saves: l.saves,
+    save_seconds: 0,
+    chain_pay: l.chainPay,
+  }));
+  const { respectPerUnit, hitPerUnit } = computeWarPayout(report, config);
+  const totalRespect = report.reduce((s, r) => s + Number(r.respect), 0);
+  const totalHits = report.reduce((s, r) => s + Number(r.war_hits), 0);
+  const respectPerHit = totalHits > 0 ? totalRespect / totalHits : 0;
+  const scoreValue = respectPerHit * respectPerUnit;
+  return {
+    respectPerHit,
+    hit: hitPerUnit + scoreValue,
+    save: config.saveAsHits * hitPerUnit + config.saveScore * scoreValue,
+    assist: config.assistAsHits * hitPerUnit + config.assistScore * scoreValue,
+    retal: config.retalFixed,
+    outside: config.includeOutside ? config.outsideAsHits * hitPerUnit : null,
+  };
+}

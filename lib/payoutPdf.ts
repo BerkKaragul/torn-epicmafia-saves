@@ -4,7 +4,7 @@
 
 import { downloadBlob } from "@/lib/download";
 import { fmtMoney } from "@/lib/format";
-import type { WarPayoutConfig, WarPayoutRow } from "@/lib/warPayout";
+import { actionValues, type WarPayoutConfig, type WarPayoutRow } from "@/lib/warPayout";
 
 export interface PayoutTotals {
   prize: number;
@@ -202,6 +202,17 @@ export async function buildPayoutPdf(input: PayoutPdfInput) {
   // re-derived or argued with
   const afterTable =
     (doc as unknown as { lastAutoTable?: { finalY: number } }).lastAutoTable?.finalY ?? 92;
+  let noteY = Math.min(afterTable + 18, doc.internal.pageSize.getHeight() - 36);
+
+  // what one of each action earned — the same estimate the web shows
+  const perAction = actionLine(lines, config);
+  if (perAction) {
+    doc.setFontSize(8);
+    doc.setTextColor(40);
+    doc.text(pdfSafe(perAction), 40, noteY, { maxWidth: pageW - 80 });
+    noteY += 14;
+  }
+
   doc.setFontSize(7.5);
   doc.setTextColor(130);
   doc.text(
@@ -211,7 +222,7 @@ export async function buildPayoutPdf(input: PayoutPdfInput) {
         (showOutside ? ` · outside ${config.outsideAsHits}x hit` : " · outside hits unpaid"),
     ),
     40,
-    Math.min(afterTable + 18, doc.internal.pageSize.getHeight() - 24),
+    noteY,
     { maxWidth: pageW - 80 },
   );
 
@@ -231,6 +242,22 @@ export function unitRateLine(totals: PayoutTotals): string {
   if (totals.respectPerUnit) parts.push(`${fmtMoney(totals.respectPerUnit)}/score`);
   if (totals.hitPerUnit) parts.push(`${fmtMoney(totals.hitPerUnit)}/hit`);
   return parts.join(" · ");
+}
+
+/**
+ * "Per action (average hit, 8.57 respect): 1 war hit $X · 1 save $Y · …" —
+ * empty when the split paid nothing per hit. See actionValues().
+ */
+export function actionLine(lines: WarPayoutRow[], config: WarPayoutConfig): string {
+  const v = actionValues(lines, config);
+  if (v.hit <= 0) return "";
+  const m = (n: number) => fmtMoney(Math.round(n));
+  const parts = [`1 war hit ${m(v.hit)}`, `1 save ${m(v.save)}`, `1 assist ${m(v.assist)}`];
+  if (v.outside) parts.push(`1 outside hit ${m(v.outside)}`);
+  if (v.retal > 0) parts.push(`retal bonus ${m(v.retal)}`);
+  return (
+    `Roughly per action (average hit, ${v.respectPerHit.toFixed(2)} respect): ` + parts.join(" · ")
+  );
 }
 
 export async function downloadPayoutPdf(input: PayoutPdfInput) {

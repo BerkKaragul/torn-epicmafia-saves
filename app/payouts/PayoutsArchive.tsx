@@ -215,28 +215,25 @@ export function PayoutsArchive({ meId, isAdmin }: { meId: number; isAdmin: boole
                 {(() => {
                   const v = actionValues(p.lines, cfg);
                   if (v.hit <= 0) return null;
-                  const items: [string, number, string?][] = [
+                  const items: [string, number][] = [
                     ["1 war hit", v.hit],
                     ["1 save", v.save],
                     ["1 assist", v.assist],
                   ];
                   if (v.outside) items.push(["1 outside hit", v.outside]);
-                  // a retal is a war hit too, so it earns the hit plus the fixed retal pay
-                  if (v.retal > 0)
-                    items.push(["1 retal", v.retal + v.hit, `${fmtMoney(v.retal)} + 1 hit`]);
+                  if (v.retal > 0) items.push(["retal bonus", v.retal]);
                   return (
                     <div className="mt-3 rounded-lg border border-neutral-800 bg-neutral-950/60 p-3">
                       <p className="text-xs font-semibold text-neutral-400">
                         Roughly what each action earned this war
                       </p>
                       <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-5">
-                        {items.map(([label, value, note]) => (
+                        {items.map(([label, value]) => (
                           <div key={label}>
                             <p className="text-base font-bold tabular-nums text-emerald-400">
                               {fmtMoney(Math.round(value))}
                             </p>
                             <p className="text-xs text-neutral-500">{label}</p>
-                            {note && <p className="text-xs text-neutral-600">({note})</p>}
                           </div>
                         ))}
                       </div>

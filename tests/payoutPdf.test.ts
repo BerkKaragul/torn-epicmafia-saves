@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
-import { pdfSafe, payoutPdfName, unitRateLine } from "../lib/payoutPdf.ts";
+import { actionLine, pdfSafe, payoutPdfName, unitRateLine } from "../lib/payoutPdf.ts";
+import { DEFAULT_CONFIG } from "../lib/warPayout.ts";
 import type { PayoutTotals } from "../lib/payoutPdf.ts";
 
 const totals = (over: Partial<PayoutTotals> = {}): PayoutTotals => ({
@@ -63,5 +64,23 @@ describe("payoutPdfName", () => {
     expect(payoutPdfName("Monarch Contagion")).toBe("war-payout-Monarch-Contagion.pdf");
     expect(payoutPdfName("[40959] Epic!")).toBe("war-payout-40959-Epic.pdf");
     expect(payoutPdfName("???")).toBe("war-payout-war.pdf");
+  });
+});
+
+describe("actionLine", () => {
+  test("lists each action's value, cp1252-safe", () => {
+    const lines = [
+      { member_id: 1, name: "A", respect: 300, war_hits: 30, outside_hits: 0, retaliations: 0,
+        assists: 0, saves: 2, chainPay: 0, retalPay: 0, share: 0, total: 1 },
+    ];
+    const line = actionLine(lines, { ...DEFAULT_CONFIG, pool: 32_000_000, retalFixed: 1_000_000 });
+    expect(line).toContain("10.00 respect");
+    expect(line).toContain("1 war hit $1,000,000");
+    expect(line).toContain("retal bonus $1,000,000");
+    expect(pdfSafe(line)).toBe(line);
+  });
+
+  test("empty when nothing was split", () => {
+    expect(actionLine([], DEFAULT_CONFIG)).toBe("");
   });
 });

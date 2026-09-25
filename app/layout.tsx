@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import { Decor } from "./Decor";
+import { WarIntro } from "./WarIntro";
 import { THEME_BOOT_SCRIPT } from "./theme";
 
 export const metadata: Metadata = {
@@ -32,6 +33,7 @@ export default function RootLayout({
       <body className="min-h-screen bg-neutral-950 text-neutral-100 antialiased">
         {children}
         <Decor />
+        <WarIntro />
       </body>
     </html>
   );

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 // A one-off war-cry splash that greets a member the first time they open the
 // site on a device. Seen-flag lives in localStorage; if storage is blocked we
@@ -10,6 +10,7 @@ const AUTO_CLOSE_MS = 4000;
 
 export function WarIntro() {
   const [open, setOpen] = useState(false);
+  const dialogRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     try {
@@ -23,12 +24,20 @@ export function WarIntro() {
 
   useEffect(() => {
     if (!open) return;
+    // it's modal: take focus while shown, keep Tab from wandering into the page
+    // behind, and hand focus back to wherever it was on close
+    const prev = document.activeElement as HTMLElement | null;
+    dialogRef.current?.focus();
     const t = setTimeout(() => setOpen(false), AUTO_CLOSE_MS);
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+      else if (e.key === "Tab") e.preventDefault();
+    };
     window.addEventListener("keydown", onKey);
     return () => {
       clearTimeout(t);
       window.removeEventListener("keydown", onKey);
+      prev?.focus?.();
     };
   }, [open]);
 
@@ -36,11 +45,13 @@ export function WarIntro() {
 
   return (
     <div
+      ref={dialogRef}
+      tabIndex={-1}
       role="dialog"
       aria-modal="true"
       aria-label="War cry"
       onClick={() => setOpen(false)}
-      className="cw-war-backdrop fixed inset-0 z-[100] flex cursor-pointer items-center justify-center bg-black/80 p-4 backdrop-blur-sm"
+      className="cw-war-backdrop fixed outline-none inset-0 z-[100] flex cursor-pointer items-center justify-center bg-black/80 p-4 backdrop-blur-sm"
     >
       <div className="cw-war-pop w-full max-w-2xl rounded-2xl border-2 border-red-600 bg-[#1a0505] px-5 py-8 text-center shadow-[0_0_60px_rgba(220,38,38,0.6)] sm:px-10 sm:py-12">
         <p className="text-4xl sm:text-5xl" aria-hidden>

@@ -221,7 +221,9 @@ export function PayoutsArchive({ meId, isAdmin }: { meId: number; isAdmin: boole
                     ["1 assist", v.assist],
                   ];
                   if (v.outside) items.push(["1 outside hit", v.outside]);
-                  if (v.retal > 0) items.push(["1 retal", v.retal, "on top of the hit"]);
+                  // a retal is a war hit too, so it earns the hit plus the fixed retal pay
+                  if (v.retal > 0)
+                    items.push(["1 retal", v.retal + v.hit, `${fmtMoney(v.retal)} + 1 hit`]);
                   return (
                     <div className="mt-3 rounded-lg border border-neutral-800 bg-neutral-950/60 p-3">
                       <p className="text-xs font-semibold text-neutral-400">
@@ -233,10 +235,8 @@ export function PayoutsArchive({ meId, isAdmin }: { meId: number; isAdmin: boole
                             <p className="text-base font-bold tabular-nums text-emerald-400">
                               {fmtMoney(Math.round(value))}
                             </p>
-                            <p className="text-xs text-neutral-500">
-                              {label}
-                              {note ? ` (${note})` : ""}
-                            </p>
+                            <p className="text-xs text-neutral-500">{label}</p>
+                            {note && <p className="text-xs text-neutral-600">({note})</p>}
                           </div>
                         ))}
                       </div>

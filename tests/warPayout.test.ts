@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
+  actionValues,
   computeWarPayout,
   DEFAULT_CONFIG,
   normalizeConfig,
@@ -129,5 +130,36 @@ describe("normalizeConfig", () => {
 
   test("negative values fall back rather than inverting the maths", () => {
     expect(normalizeConfig({ retalFixed: -5 }).retalFixed).toBe(DEFAULT_CONFIG.retalFixed);
+  });
+});
+
+describe("actionValues", () => {
+  test("hit/save/assist values add back up to the split", () => {
+    const config = cfg({ saveAsHits: 2, saveScore: 1, assistAsHits: 1, assistScore: 0.5 });
+    const p = computeWarPayout(
+      [
+        row({ member_id: 1, name: "A", respect: 300, war_hits: 30, saves: 4 }),
+        row({ member_id: 2, name: "B", respect: 210, war_hits: 31, assists: 6 }),
+        row({ member_id: 3, name: "C", respect: 90, war_hits: 9, saves: 1, assists: 2 }),
+      ],
+      config,
+    );
+    const v = actionValues(p.rows, config);
+    expect(v.respectPerHit).toBeCloseTo(600 / 70);
+    // an average-respect member's share is exactly hits×hit + saves×save + assists×assist;
+    // summed over everyone the respect deviations cancel, so the pool is recovered
+    const hits = 70, saves = 5, assists = 8;
+    expect(hits * v.hit + saves * v.save + assists * v.assist).toBeCloseTo(p.distributed, 0);
+    expect(v.outside).toBeNull();
+  });
+
+  test("works from the frozen lines exactly as from the report", () => {
+    const report = [
+      row({ member_id: 1, name: "A", respect: 100, war_hits: 10 }),
+      row({ member_id: 2, name: "B" }), // nothing at all — dropped from the lines
+    ];
+    const p = computeWarPayout(report, cfg());
+    const v = actionValues(p.rows, cfg());
+    expect(v.hit * 10).toBeCloseTo(p.distributed, 0);
   });
 });

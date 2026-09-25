@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { fmtMoney } from "@/lib/format";
 import { downloadCsv } from "@/lib/download";
 import { downloadPayoutPdf, unitRateLine, type PayoutTotals } from "@/lib/payoutPdf";
-import { normalizeConfig, type WarPayoutRow } from "@/lib/warPayout";
+import { actionValues, normalizeConfig, type WarPayoutRow } from "@/lib/warPayout";
 
 interface SavedPayout {
   torn_war_id: number;
@@ -212,6 +212,41 @@ export function PayoutsArchive({ meId, isAdmin }: { meId: number; isAdmin: boole
                     ≈ {unitRateLine(p.totals)} — what the split paid per unit
                   </p>
                 )}
+                {(() => {
+                  const v = actionValues(p.lines, cfg);
+                  if (v.hit <= 0) return null;
+                  const items: [string, number, string?][] = [
+                    ["1 war hit", v.hit],
+                    ["1 save", v.save],
+                    ["1 assist", v.assist],
+                  ];
+                  if (v.outside) items.push(["1 outside hit", v.outside]);
+                  if (v.retal > 0) items.push(["1 retal", v.retal, "on top of the hit"]);
+                  return (
+                    <div className="mt-3 rounded-lg border border-neutral-800 bg-neutral-950/60 p-3">
+                      <p className="text-xs font-semibold text-neutral-400">
+                        Roughly what each action earned this war
+                      </p>
+                      <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-5">
+                        {items.map(([label, value, note]) => (
+                          <div key={label}>
+                            <p className="text-base font-bold tabular-nums text-emerald-400">
+                              {fmtMoney(Math.round(value))}
+                            </p>
+                            <p className="text-xs text-neutral-500">
+                              {label}
+                              {note ? ` (${note})` : ""}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                      <p className="mt-2 text-xs text-neutral-600">
+                        Estimate for an average hit ({v.respectPerHit.toFixed(2)} respect). A hit
+                        scoring more respect earned more. Doesn&apos;t include chain-hour pay.
+                      </p>
+                    </div>
+                  );
+                })()}
                 <div className="mt-3 overflow-x-auto">
                   <table className="w-full text-left text-sm">
                     <thead className="text-xs uppercase text-neutral-500">

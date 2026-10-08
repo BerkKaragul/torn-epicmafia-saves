@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChainWatch Saver Widget
 // @namespace    chainwatch.epicmafia
-// @version      1.11.0
+// @version      1.11.1
 // @description  Shows the current & next chain saver (and timer) from ChainWatch, inside Torn — with the same danger siren as the site (one tab plays, not all).
 // @author       EPIC Mafia
 // @license      MIT
@@ -155,11 +155,14 @@
   // ── cross-tab audio master ─────────────────────────────────────────────────
   // With several Torn tabs open, every tab would blast the siren at once. Only
   // ONE tab should make the sound (the visual widget still runs in all of them).
-  // Armed tabs elect a single "audio master" over a BroadcastChannel: a visible
-  // tab beats a hidden one, ties broken by the oldest tab. Electing only among
-  // *armed* tabs guarantees the master's audio is unlocked (arming = a click).
+  // Tabs elect a single "audio master" over a BroadcastChannel: a visible tab
+  // beats a hidden one, ties broken by the oldest tab. Only tabs that are
+  // actually sounding take part — a tab that's muted ("only on my turn"),
+  // disarmed, retired, or whose audio the browser blocked must never win,
+  // or nobody plays at all. Old (pre-1.11.1) tabs don't send `on`, so they
+  // never win either.
   const TAB_ID = Date.now() + "-" + Math.random();
-  const peers = {}; // other armed tabs -> { t: lastBeat ms, vis: 0 visible / 1 hidden }
+  const peers = {}; // other tabs -> { t: lastBeat ms, vis: 0 visible / 1 hidden, on: sounding }
   let bc = null;
   try {
     if (window.BroadcastChannel) bc = new BroadcastChannel("cw_siren_audio");
@@ -184,18 +187,22 @@
         delete peers[id]; // stale — that tab is gone or throttled
         continue;
       }
+      if (!p.on) continue; // not sounding — can't stand in for us
       if (p.vis < myV) return false; // a visible armed tab outranks this hidden one
       if (p.vis === myV && olderThan(id, TAB_ID)) return false; // same visibility, older wins
     }
     return true;
   }
+  // sounding = siren running here, and the browser hasn't blocked our audio
+  // (a context still suspended after a burst means no user gesture yet)
+  const sounding = () => !!sirenTimer && (!audioCtx || audioCtx.state === "running");
   function announce(type) {
-    if (bc) bc.postMessage({ type: type, id: TAB_ID, vis: myVis() });
+    if (bc) bc.postMessage({ type: type, id: TAB_ID, vis: myVis(), on: sounding() });
   }
   if (bc) {
     bc.onmessage = function (e) {
       const m = e.data || {};
-      if (m.type === "beat" && m.id) peers[m.id] = { t: Date.now(), vis: m.vis || 0 };
+      if (m.type === "beat" && m.id) peers[m.id] = { t: Date.now(), vis: m.vis || 0, on: !!m.on };
       else if (m.type === "bye" && m.id) delete peers[m.id];
     };
     setInterval(() => announce("beat"), 1000); // heartbeat so others can rank us
@@ -208,9 +215,11 @@
   }
 
   function stopSiren() {
-    if (sirenTimer) clearInterval(sirenTimer);
+    if (!sirenTimer) return;
+    clearInterval(sirenTimer);
     sirenTimer = null;
     sirenLevel = null;
+    announce("beat"); // tell the others at once so one of them can take over
   }
 
   function updateSiren(live, danger, critical) {
@@ -221,10 +230,11 @@
     if (sirenTimer && sirenLevel === critical) return; // already running at right cadence
     stopSiren();
     sirenLevel = critical;
-    burst(critical);
     sirenTimer = setInterval(function () {
       burst(critical);
     }, alarmInterval(critical));
+    announce("beat"); // claim the sound before the first burst
+    burst(critical);
   }
 
   // ── widget element ───────────────────────────────────────────────────────
@@ -262,7 +272,7 @@
     '<label data-cw-nodrag="1" style="display:flex;align-items:center;gap:4px;font-size:10px;' +
     'color:#a3a3a3;margin-bottom:4px;cursor:pointer">' +
     '<input id="cw-onlyduty" type="checkbox" style="accent-color:#10b981;cursor:pointer">' +
-    'only alarm when I&#39;m saving</label>' +
+    'only alarm on my turn</label>' +
     '<input id="cw-myname" data-cw-nodrag="1" type="text" placeholder="your exact Torn name" ' +
     'style="display:none;width:100%;box-sizing:border-box;margin:0 0 6px;padding:2px 5px;' +
     'font-size:10px;background:#171717;border:1px solid #404040;border-radius:5px;color:#e5e5e5">' +
@@ -300,6 +310,31 @@
     myName = this.value.trim();
     GM_setValue("cw_myname", myName);
   });
+
+  // Settings live in GM storage, shared by every tab, but each tab read them
+  // once at load — so a change made in one tab never reached the others
+  // (including whichever tab was making the sound). Re-read them every tick.
+  function syncSettings() {
+    const armed = GM_getValue("cw_siren", false);
+    if (armed !== sirenOn) {
+      sirenOn = armed;
+      sirenBtn.textContent = sirenOn ? "🔊" : "🔇";
+      sirenBtn.title = sirenOn ? "Siren armed — tap to mute" : "Arm danger siren";
+    }
+    onlyDuty = GM_getValue("cw_onlyduty", false);
+    if (onlyDutyBox.checked !== onlyDuty) {
+      onlyDutyBox.checked = onlyDuty;
+      myNameInput.style.display = onlyDuty ? "block" : "none";
+    }
+    if (document.activeElement !== myNameInput) {
+      myName = GM_getValue("cw_myname", "");
+      if (myNameInput.value !== myName) myNameInput.value = myName;
+    }
+    if (document.activeElement !== volSlider) {
+      sirenVol = GM_getValue("cw_vol", 1);
+      volSlider.value = Math.round(sirenVol * 100);
+    }
+  }
 
   // optional "I'm here" button (delegated — the body is re-rendered each poll):
   // copies a ready-to-paste "Saving #<chain> if needed" note to the clipboard
@@ -454,7 +489,7 @@
   // outdated install without anyone touching the server. The fallback (for
   // hosts without GM_info) must match @version, or the floor locks it out.
   const MY_VERSION =
-    (typeof GM_info !== "undefined" && GM_info.script && GM_info.script.version) || "1.11.0";
+    (typeof GM_info !== "undefined" && GM_info.script && GM_info.script.version) || "1.11.1";
   const belowFloor = () => !!(data && data.min_version && cmpVersion(MY_VERSION, data.min_version) < 0);
   const INSTALL_URL = "https://greasyfork.org/en/scripts/589168-chainwatch-saver-widget";
   function cmpVersion(a, b) {
@@ -475,6 +510,7 @@
   function render() {
     const body = document.getElementById("cw-body");
     if (!body) return;
+    syncSettings();
     const link = SITE + "/duty";
 
     if (!data) {

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChainWatch Saver Widget
 // @namespace    chainwatch.epicmafia
-// @version      1.10.0
+// @version      1.11.0
 // @description  Shows the current & next chain saver (and timer) from ChainWatch, inside Torn — with the same danger siren as the site (one tab plays, not all).
 // @author       EPIC Mafia
 // @license      MIT
@@ -10,7 +10,7 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_setClipboard
-// @connect      torn-epicmafia-saves.vercel.app
+// @connect      betugujkfdblyfnlyikr.supabase.co
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -20,10 +20,21 @@
   // No setup needed — it just works. Data is faction-scoped and read-only
   // (saver names + chain timer only).
   const SITE = "https://torn-epicmafia-saves.vercel.app";
+  // The live feed is read straight from Supabase (a public, read-only RPC), not
+  // through the site: polling the site cost a Vercel function call per poll.
+  // The anon key is public by design — every table is locked behind RLS and
+  // this one function is all it can reach.
+  const FEED_URL = "https://betugujkfdblyfnlyikr.supabase.co/rest/v1/rpc/widget_feed";
+  const FEED_KEY =
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJldHVndWprZmRibHlmbmx5aWtyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQyODc2NzcsImV4cCI6MjA5OTg2MzY3N30.aLOfA2MAYX6n33WwRwUFHkJDD6bgtiHrpIJyqTqjjVY";
   // Adaptive cadence: relaxed while the chain is healthy, tight in the danger
-  // window so a landed save clears the siren within seconds (war = seconds).
-  const POLL_CALM_MS = 7000;
-  const POLL_DANGER_MS = 3000;
+  // window so a landed save clears the siren within seconds (war = seconds),
+  // and slow while there's no chain worth showing. The server refreshes the
+  // chain every ~10s and the countdown runs locally, so polling faster than
+  // this buys nothing.
+  const POLL_IDLE_MS = 60000;
+  const POLL_CALM_MS = 15000;
+  const POLL_DANGER_MS = 5000;
   // Hide the whole widget for small/no chains — only chains worth saving (≥10)
   // are shown. Doubles as the "get it off my screen when nothing's happening"
   // ask, so no separate close button is needed.
@@ -440,9 +451,11 @@
   // ── self-update signalling ─────────────────────────────────────────────────
   // The server advertises the latest (and minimum-allowed) widget version; we
   // compare against our own so we can nudge — or, in an emergency, stop — an
-  // outdated install without anyone touching the server.
+  // outdated install without anyone touching the server. The fallback (for
+  // hosts without GM_info) must match @version, or the floor locks it out.
   const MY_VERSION =
-    (typeof GM_info !== "undefined" && GM_info.script && GM_info.script.version) || "1.9.0";
+    (typeof GM_info !== "undefined" && GM_info.script && GM_info.script.version) || "1.11.0";
+  const belowFloor = () => !!(data && data.min_version && cmpVersion(MY_VERSION, data.min_version) < 0);
   const INSTALL_URL = "https://greasyfork.org/en/scripts/589168-chainwatch-saver-widget";
   function cmpVersion(a, b) {
     const pa = String(a).split(".").map((n) => parseInt(n, 10) || 0);
@@ -472,7 +485,7 @@
 
     // outdated → gentle nudge; below the server's floor → stop and demand update
     const outdated = data.latest_version && cmpVersion(MY_VERSION, data.latest_version) < 0;
-    if (data.min_version && cmpVersion(MY_VERSION, data.min_version) < 0) {
+    if (belowFloor()) {
       updateSiren(false, false, false);
       box.style.display = "";
       body.innerHTML =
@@ -589,16 +602,44 @@
     body.innerHTML = html;
   }
 
+  // ── one fetch per browser, not per tab ──────────────────────────────────
+  // Every Torn page load and every open tab runs its own copy of this script,
+  // and each used to poll on its own clock — a few tabs per member multiplied
+  // the traffic. The last reading is shared through GM storage (common to all
+  // tabs and page loads): a tab only fetches when nobody has within the
+  // current cadence, otherwise it adopts the shared copy. A freshly loaded
+  // page also paints from it at once instead of fetching.
+  const SHARED_KEY = "cw_feed"; // { at, data, off } — the last reading, and when
+  const CLAIM_KEY = "cw_feed_claim"; // ms when some tab started a fetch
+  function adoptShared(maxAgeMs) {
+    const sh = GM_getValue(SHARED_KEY, null);
+    if (!sh || !sh.data || Date.now() - sh.at >= maxAgeMs) return false;
+    data = sh.data;
+    clockOffsetMs = sh.off || 0;
+    return true;
+  }
+
   function poll() {
+    // a little slack so a tab whose timer lands just before the cadence is up
+    // still adopts the copy instead of fetching again
+    if (adoptShared(currentPollMs() - 1000) || Date.now() - GM_getValue(CLAIM_KEY, 0) < 3000) {
+      render(); // fresh enough, or another tab's fetch is already in flight
+      return;
+    }
+    GM_setValue(CLAIM_KEY, Date.now());
     GM_xmlhttpRequest({
       method: "GET",
-      url: SITE + "/api/widget?t=" + Date.now(),
+      url: FEED_URL,
+      headers: { apikey: FEED_KEY },
       timeout: 10000,
       onload: function (r) {
         syncClock(r.responseHeaders);
         try {
           const j = JSON.parse(r.responseText);
-          if (!j.error) data = j;
+          if (j && j.ok) {
+            data = j;
+            GM_setValue(SHARED_KEY, { at: Date.now(), data: j, off: clockOffsetMs });
+          }
         } catch (e) {
           /* keep showing last known data */
         }
@@ -610,10 +651,13 @@
     });
   }
 
-  // poll faster while the chain is in the danger window, slower when it's safe
+  // poll faster while the chain is in the danger window, slower when it's
+  // safe, and rarely when there's no chain worth showing (widget hidden)
   function currentPollMs() {
+    if (belowFloor()) return POLL_IDLE_MS; // retired install: just watch for the floor to drop
     if (data && data.chain) {
       const c = data.chain;
+      if (c.current < HIDE_BELOW_CHAIN) return POLL_IDLE_MS;
       const live = c.id > 0 && c.current > 0 && c.cooldown_s === 0;
       if (live) {
         const remaining = c.observed_at
@@ -633,6 +677,7 @@
     }, currentPollMs());
   }
 
+  adoptShared(Infinity); // paint the last shared reading at once, however old
   render(); // apply the hide-when-small rule immediately (no first-paint flash)
   poll();
   scheduleNextPoll();

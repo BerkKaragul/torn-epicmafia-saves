@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChainWatch Saver Widget
 // @namespace    chainwatch.epicmafia
-// @version      1.11.1
+// @version      1.12.0
 // @description  Shows the current & next chain saver (and timer) from ChainWatch, inside Torn — with the same danger siren as the site (one tab plays, not all).
 // @author       EPIC Mafia
 // @license      MIT
@@ -10,6 +10,7 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_setClipboard
+// @grant        GM_registerMenuCommand
 // @connect      betugujkfdblyfnlyikr.supabase.co
 // @run-at       document-idle
 // ==/UserScript==
@@ -257,15 +258,23 @@
     userSelect: "none",
     touchAction: "none", // let us handle touch-drag instead of the page scrolling
   });
-  // Persistent header (title + siren toggle) so a re-render never wipes the
-  // button; only #cw-body is rewritten each poll.
+  // Persistent header (title + siren toggle + minimize/close) so a re-render
+  // never wipes the buttons; only #cw-body is rewritten each poll. Minimized,
+  // the header alone stays, with the countdown (#cw-mini) beside the title.
+  const HDR_BTN =
+    'data-cw-nodrag="1" style="cursor:pointer;font-size:14px;line-height:1;color:#737373;padding:0 1px"';
   box.innerHTML =
-    '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">' +
-    '<b style="color:#34d399;font-size:11px;flex:1">🔗 ChainWatch</b>' +
+    '<div id="cw-head" style="display:flex;align-items:center;gap:6px;margin-bottom:4px">' +
+    '<b style="color:#34d399;font-size:11px;flex:1;white-space:nowrap">🔗 ChainWatch ' +
+    '<span id="cw-mini" style="display:none;font-variant-numeric:tabular-nums"></span></b>' +
     '<span id="cw-siren" data-cw-nodrag="1" style="cursor:pointer;font-size:15px;line-height:1" ' +
     'title="Arm danger siren">' +
     (sirenOn ? "🔊" : "🔇") +
-    "</span></div>" +
+    "</span>" +
+    '<span id="cw-minbtn" ' + HDR_BTN + ">–</span>" +
+    '<span id="cw-close" ' + HDR_BTN + ' title="Hide until the next chain">×</span>' +
+    "</div>" +
+    '<div id="cw-full">' +
     '<input id="cw-vol" data-cw-nodrag="1" type="range" min="0" max="100" ' +
     'title="Siren volume" ' +
     'style="width:100%;height:12px;margin:0 0 6px;accent-color:#10b981;cursor:pointer;display:block">' +
@@ -276,8 +285,52 @@
     '<input id="cw-myname" data-cw-nodrag="1" type="text" placeholder="your exact Torn name" ' +
     'style="display:none;width:100%;box-sizing:border-box;margin:0 0 6px;padding:2px 5px;' +
     'font-size:10px;background:#171717;border:1px solid #404040;border-radius:5px;color:#e5e5e5">' +
-    '<div id="cw-body">ChainWatch…</div>';
+    '<div id="cw-body">ChainWatch…</div>' +
+    "</div>";
   document.body.appendChild(box);
+
+  // ── minimize / close ──────────────────────────────────────────────────────
+  // Both live in GM storage so every tab follows (re-read in syncSettings).
+  // Close hides the widget for the CURRENT chain only — it comes back by itself
+  // when the next chain starts, so nobody loses it for good. To bring it back
+  // sooner: the userscript manager's menu → "Show ChainWatch widget".
+  // The siren keeps following its own toggle either way.
+  let minimized = GM_getValue("cw_min", false);
+  let closedChain = GM_getValue("cw_closed", 0); // chain id hidden for, 0 = none
+  const fullEl = box.querySelector("#cw-full");
+  const headEl = box.querySelector("#cw-head");
+  const miniEl = box.querySelector("#cw-mini");
+  const minBtn = box.querySelector("#cw-minbtn");
+  function applyMinimized() {
+    fullEl.style.display = minimized ? "none" : "";
+    headEl.style.marginBottom = minimized ? "0" : "4px";
+    miniEl.style.display = minimized ? "" : "none";
+    minBtn.textContent = minimized ? "+" : "–";
+    minBtn.title = minimized ? "Expand" : "Minimize";
+  }
+  applyMinimized();
+  minBtn.addEventListener("click", function (e) {
+    e.stopPropagation();
+    minimized = !minimized;
+    GM_setValue("cw_min", minimized);
+    applyMinimized();
+  });
+  box.querySelector("#cw-close").addEventListener("click", function (e) {
+    e.stopPropagation();
+    closedChain = (data && data.chain && data.chain.id) || 0;
+    GM_setValue("cw_closed", closedChain);
+    render();
+  });
+  if (typeof GM_registerMenuCommand === "function") {
+    GM_registerMenuCommand("Show ChainWatch widget", function () {
+      closedChain = 0;
+      minimized = false;
+      GM_setValue("cw_closed", 0);
+      GM_setValue("cw_min", false);
+      applyMinimized();
+      render();
+    });
+  }
 
   // siren volume slider — persisted per device; preview a blast on release
   const volSlider = box.querySelector("#cw-vol");
@@ -334,6 +387,12 @@
       sirenVol = GM_getValue("cw_vol", 1);
       volSlider.value = Math.round(sirenVol * 100);
     }
+    const min = GM_getValue("cw_min", false);
+    if (min !== minimized) {
+      minimized = min;
+      applyMinimized();
+    }
+    closedChain = GM_getValue("cw_closed", 0);
   }
 
   // optional "I'm here" button (delegated — the body is re-rendered each poll):
@@ -489,7 +548,7 @@
   // outdated install without anyone touching the server. The fallback (for
   // hosts without GM_info) must match @version, or the floor locks it out.
   const MY_VERSION =
-    (typeof GM_info !== "undefined" && GM_info.script && GM_info.script.version) || "1.11.1";
+    (typeof GM_info !== "undefined" && GM_info.script && GM_info.script.version) || "1.12.0";
   const belowFloor = () => !!(data && data.min_version && cmpVersion(MY_VERSION, data.min_version) < 0);
   const INSTALL_URL = "https://greasyfork.org/en/scripts/589168-chainwatch-saver-widget";
   function cmpVersion(a, b) {
@@ -511,6 +570,7 @@
     const body = document.getElementById("cw-body");
     if (!body) return;
     syncSettings();
+    adoptNewer();
     const link = SITE + "/duty";
 
     if (!data) {
@@ -539,7 +599,7 @@
       box.style.display = "none";
       return;
     }
-    box.style.display = "";
+    box.style.display = closedChain && closedChain === c.id ? "none" : "";
 
     const live = c.id > 0 && c.current > 0 && c.cooldown_s === 0;
     // extrapolate from when the poller last observed the timer (server clock)
@@ -548,6 +608,8 @@
     const danger = live && remaining <= (data.alert_threshold_s || 90);
     const critical = live && remaining <= Math.round((data.alert_threshold_s || 90) / 2);
     const timerColor = critical ? "#f87171" : danger ? "#fbbf24" : "#34d399";
+    miniEl.textContent = live ? fmt(remaining) : c.cooldown_s > 0 ? "cooldown" : "";
+    miniEl.style.color = timerColor;
 
     // scary like the site: glow the box red while the chain is in danger
     if (danger) {
@@ -647,12 +709,20 @@
   // page also paints from it at once instead of fetching.
   const SHARED_KEY = "cw_feed"; // { at, data, off } — the last reading, and when
   const CLAIM_KEY = "cw_feed_claim"; // ms when some tab started a fetch
+  let dataAt = 0; // local ms when our current reading was fetched (by any tab)
   function adoptShared(maxAgeMs) {
     const sh = GM_getValue(SHARED_KEY, null);
     if (!sh || !sh.data || Date.now() - sh.at >= maxAgeMs) return false;
     data = sh.data;
+    dataAt = sh.at;
     clockOffsetMs = sh.off || 0;
     return true;
+  }
+  // every tick: pick up a reading another tab fetched since ours, so tabs stay
+  // in step with whichever one is doing the fetching
+  function adoptNewer() {
+    const sh = GM_getValue(SHARED_KEY, null);
+    if (sh && sh.data && sh.at > dataAt) adoptShared(Infinity);
   }
 
   function poll() {
@@ -674,7 +744,8 @@
           const j = JSON.parse(r.responseText);
           if (j && j.ok) {
             data = j;
-            GM_setValue(SHARED_KEY, { at: Date.now(), data: j, off: clockOffsetMs });
+            dataAt = Date.now();
+            GM_setValue(SHARED_KEY, { at: dataAt, data: j, off: clockOffsetMs });
           }
         } catch (e) {
           /* keep showing last known data */
@@ -713,7 +784,11 @@
     }, currentPollMs());
   }
 
-  adoptShared(Infinity); // paint the last shared reading at once, however old
+  // Paint the last shared reading at once — but only a recent one. An old
+  // reading extrapolates the timer to 0:00 and would blast a false siren for
+  // the moment until the fresh fetch lands. While Torn is open some tab
+  // refreshes it every ≤15s, so page-to-page navigation still paints instantly.
+  adoptShared(POLL_CALM_MS);
   render(); // apply the hide-when-small rule immediately (no first-paint flash)
   poll();
   scheduleNextPoll();

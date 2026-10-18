@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChainWatch Saver Widget
 // @namespace    chainwatch.epicmafia
-// @version      1.15.2
+// @version      1.15.3
 // @description  Shows the current & next chain saver (and timer) from ChainWatch, inside Torn — with the same danger siren as the site (one tab plays, not all).
 // @author       EPIC Mafia
 // @license      MIT
@@ -396,17 +396,42 @@
   //            the bars (and TornTools' OC/RW lines, if any)
   //   mobile:  bar < bars row < user-info rows < header; we go right under
   //            the user-info rows, as a row of the header
+  // One member's TornPDA (iPhone) shows the bars yet never matched them, so
+  // a phone-width page that has Torn's sidebar root but no recognisable bars
+  // docks at the end of that root — right under the header rows. dockDiag
+  // records how the slot was found (shown faint beside the version tag when
+  // it isn't the normal way): m/v = bars matched/visible, then r = docked via
+  // the root fallback, x = a bar we couldn't classify, p = parents missing,
+  // n = nowhere to dock.
+  let dockDiag = "";
   function sidebarSlot() {
-    const bar = Array.from(
+    const all = Array.from(
       document.querySelectorAll('[class*="bar-desktop___"], [class*="bar-mobile___"]'),
-    ).find((el) => el.getClientRects().length);
-    if (!bar || !bar.parentElement) return null;
-    const bars = bar.parentElement;
-    if (/bar-desktop/.test(bar.className) && bars.parentElement)
-      return { mode: "desktop", parent: bars.parentElement, after: null };
-    const rows = bars.parentElement;
-    if (/bar-mobile/.test(bar.className) && rows && rows.parentElement)
-      return { mode: "mobile", parent: rows.parentElement, after: rows };
+    );
+    const visible = all.filter((el) => el.getClientRects().length);
+    const counts = "m" + all.length + "v" + visible.length;
+    const bar = visible[0];
+    const cls = bar ? bar.getAttribute("class") || "" : ""; // a string even on SVG
+    let why = "n";
+    if (bar && bar.parentElement) {
+      const bars = bar.parentElement;
+      const rows = bars.parentElement;
+      if (/bar-desktop/.test(cls) && rows) {
+        dockDiag = "";
+        return { mode: "desktop", parent: rows, after: null };
+      }
+      if (/bar-mobile/.test(cls) && rows && rows.parentElement) {
+        dockDiag = "";
+        return { mode: "mobile", parent: rows.parentElement, after: rows };
+      }
+      why = /bar-(desktop|mobile)/.test(cls) ? "p" : "x";
+    }
+    const root = document.getElementById("sidebarroot");
+    if (window.innerWidth < 1000 && root && root.getClientRects().length) {
+      dockDiag = counts + why + "r";
+      return { mode: "mobile", parent: root, after: null };
+    }
+    dockDiag = counts + why;
     return null;
   }
 
@@ -719,12 +744,15 @@
   // outdated install without anyone touching the server. The fallback (for
   // hosts without GM_info) must match @version, or the floor locks it out.
   const MY_VERSION =
-    (typeof GM_info !== "undefined" && GM_info.script && GM_info.script.version) || "1.15.2";
+    (typeof GM_info !== "undefined" && GM_info.script && GM_info.script.version) || "1.15.3";
   // tucked into the bottom-right corner, faint and taking no space of its
   // own, so a screenshot tells which build runs
-  const VERSION_TAG =
+  const versionTag = () =>
     '<span style="position:absolute;right:5px;bottom:2px;font-size:8px;line-height:1;' +
-    'color:#5c5c5c;pointer-events:none">v' + MY_VERSION + "</span>";
+    'color:#5c5c5c;pointer-events:none">v' +
+    MY_VERSION +
+    (dockDiag && !poppedOut ? " · " + dockDiag : "") +
+    "</span>";
   const belowFloor = () => !!(data && data.min_version && cmpVersion(MY_VERSION, data.min_version) < 0);
   const INSTALL_URL = "https://greasyfork.org/en/scripts/589168-chainwatch-saver-widget";
   function cmpVersion(a, b) {
@@ -776,7 +804,7 @@
         lastError +
         (data ? " · last update " + fmt((Date.now() - dataAt) / 1000) + " ago" : "") +
         "</div>" +
-        VERSION_TAG;
+        versionTag();
       return;
     }
 
@@ -790,7 +818,7 @@
         '<a href="' +
         INSTALL_URL +
         '" target="_blank" style="color:#34d399;font-weight:700;text-decoration:underline">Update the widget →</a>' +
-        VERSION_TAG;
+        versionTag();
       return;
     }
 
@@ -904,7 +932,7 @@
         INSTALL_URL +
         '" target="_blank" style="display:block;margin-top:3px;color:#fbbf24;font-size:10px;text-decoration:underline">⬆ Update available</a>';
     }
-    html += VERSION_TAG;
+    html += versionTag();
 
     body.innerHTML = html;
   }

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChainWatch Saver Widget
 // @namespace    chainwatch.epicmafia
-// @version      1.14.0
+// @version      1.15.0
 // @description  Shows the current & next chain saver (and timer) from ChainWatch, inside Torn — with the same danger siren as the site (one tab plays, not all).
 // @author       EPIC Mafia
 // @license      MIT
@@ -11,7 +11,7 @@
 // @grant        GM_setValue
 // @grant        GM_setClipboard
 // @grant        GM_registerMenuCommand
-// @connect      betugujkfdblyfnlyikr.supabase.co
+// @connect      91-98-237-108.sslip.io
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -21,21 +21,22 @@
   // No setup needed — it just works. Data is faction-scoped and read-only
   // (saver names + chain timer only).
   const SITE = "https://torn-epicmafia-saves.vercel.app";
-  // The live feed is read straight from Supabase (a public, read-only RPC), not
-  // through the site: polling the site cost a Vercel function call per poll.
-  // The anon key is public by design — every table is locked behind RLS and
-  // this one function is all it can reach.
-  const FEED_URL = "https://betugujkfdblyfnlyikr.supabase.co/rest/v1/rpc/widget_feed";
+  // The live feed is read straight from the ChainWatch server (a public,
+  // read-only RPC), not through the site: polling the site cost a Vercel
+  // function call per poll. It moved off Supabase in 1.15.0 when the free
+  // plan's traffic quota ran out. The anon key is public by design — every
+  // table is locked behind RLS and this one function is all it can reach.
+  const FEED_URL = "https://91-98-237-108.sslip.io/rest/v1/rpc/widget_feed";
   const FEED_KEY =
-    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJldHVndWprZmRibHlmbmx5aWtyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQyODc2NzcsImV4cCI6MjA5OTg2MzY3N30.aLOfA2MAYX6n33WwRwUFHkJDD6bgtiHrpIJyqTqjjVY";
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYW5vbiIsImlzcyI6ImNoYWlud2F0Y2giLCJpYXQiOjE3OTIzMjA5MjIsImV4cCI6MjQyMzA0MDkyMn0.qnKJI-EMIUiipNseJHLK1EhnPb4HYu5YB6Kx2KJ_TUc";
   // Adaptive cadence: relaxed while the chain is healthy, tight in the danger
   // window so a landed save clears the siren within seconds (war = seconds),
   // and slow while there's no chain worth showing. The server refreshes the
-  // chain every ~10s and the countdown runs locally, so polling faster than
-  // this buys nothing.
+  // chain every ~10s and the countdown runs locally; on our own server traffic
+  // is free, so the widget picks up each refresh within a few seconds.
   const POLL_IDLE_MS = 60000;
-  const POLL_CALM_MS = 15000;
-  const POLL_DANGER_MS = 5000;
+  const POLL_CALM_MS = 5000;
+  const POLL_DANGER_MS = 3000;
   // Hide the whole widget for small/no chains — only chains worth saving (≥10)
   // are shown, so it's off the screen when nothing's happening.
   const HIDE_BELOW_CHAIN = 10;
@@ -266,7 +267,7 @@
     'data-cw-nodrag="1" style="flex:none;width:10px;text-align:center;cursor:pointer;font-size:14px;' +
     'line-height:1;color:#737373"';
   box.innerHTML =
-    '<div id="cw-head" style="display:flex;align-items:center;gap:6px;margin-bottom:4px">' +
+    '<div id="cw-head" style="display:flex;align-items:center;gap:4px;margin-bottom:4px">' +
     '<b style="color:#34d399;font-size:11px;flex:1;min-width:0;overflow:hidden;white-space:nowrap">' +
     '🔗<span id="cw-title"> ChainWatch</span> ' +
     '<span id="cw-mini" style="display:none;font-variant-numeric:tabular-nums"></span>' +
@@ -276,7 +277,8 @@
     (sirenOn ? "🔊" : "🔇") +
     "</span>" +
     '<span id="cw-minbtn" ' + HDR_BTN + ">–</span>" +
-    '<span id="cw-close" ' + HDR_BTN + ' title="Shrink to a small tab">×</span>' +
+    '<span id="cw-pop" ' + HDR_BTN + ' title="Pop out (float and drag it)">⤢</span>' +
+    '<span id="cw-close" ' + HDR_BTN + ">×</span>" +
     "</div>" +
     '<div id="cw-full">' +
     '<input id="cw-vol" data-cw-nodrag="1" type="range" min="0" max="100" ' +
@@ -298,15 +300,19 @@
   // of the page; on mobile Torn (TornPDA too) the sidebar is a header strip of
   // bars, and the widget becomes one more full-width row under it. Wherever
   // neither is on screen (Information block collapsed, a layout we don't know)
-  // it floats and can be dragged instead.
-  // Floating, × shrinks it to a small tab that a tap brings back. It never
-  // disappears outright: 1.12.0 hid it for the whole chain, and TornPDA has no
-  // userscript menu to bring it back, so a closed widget stayed lost for days.
-  // Minimize and pill live in GM storage so every tab follows (syncSettings).
-  // The siren keeps following its own toggle either way.
+  // it floats and can be dragged instead. Some prefer the old floating widget:
+  // ⤢ pops it out of the sidebar, and × on the floating one puts it back.
+  // With nowhere to dock, × shrinks it to a small tab that a tap brings back.
+  // It never disappears outright: 1.12.0 hid it for the whole chain, and
+  // TornPDA has no userscript menu to bring it back, so a closed widget stayed
+  // lost for days.
+  // Minimize, pop-out and pill live in GM storage so every tab follows
+  // (syncSettings). The siren keeps following its own toggle either way.
   let minimized = GM_getValue("cw_min", false);
   let pill = GM_getValue("cw_pill", false);
+  let poppedOut = GM_getValue("cw_float", false);
   let docked = null; // null = floating, else "desktop" / "mobile"
+  let dockable = false; // a sidebar/header slot is on screen (docked or not)
   const fullEl = box.querySelector("#cw-full");
   const headEl = box.querySelector("#cw-head");
   const miniEl = box.querySelector("#cw-mini");
@@ -314,6 +320,7 @@
   const titleEl = box.querySelector("#cw-title");
   const minBtn = box.querySelector("#cw-minbtn");
   const closeBtn = box.querySelector("#cw-close");
+  const popBtn = box.querySelector("#cw-pop");
   // docked: the widget plus a divider styled like Torn's own, so it reads as
   // one more section of the sidebar
   const dock = document.createElement("div");
@@ -321,7 +328,7 @@
   dock.appendChild(dockHr);
 
   function applyLayout() {
-    const asPill = pill && !docked;
+    const asPill = pill && !dockable; // with a slot on screen, × means "dock it"
     const folded = minimized || asPill;
     const strip = docked === "mobile"; // a full-width row has room to spare
     fullEl.style.display = folded ? "none" : "";
@@ -334,12 +341,16 @@
     box.querySelector("#cw-siren").style.display = asPill ? "none" : "";
     minBtn.style.display = asPill ? "none" : "";
     closeBtn.style.display = docked || asPill ? "none" : ""; // nothing to shrink in the sidebar
+    closeBtn.title = dockable ? "Put it back in the sidebar" : "Shrink to a small tab";
+    popBtn.style.display = docked ? "" : "none";
     minBtn.textContent = minimized ? "+" : "–";
     minBtn.title = minimized ? "Expand" : "Minimize";
     box.title = asPill ? "Tap to open ChainWatch" : "";
     if (docked) {
       Object.assign(box.style, {
-        position: "static",
+        position: "relative", // in the page flow; anchors the version tag
+        top: "", // the floating position would shift a relative box
+        left: "",
         fontFamily: "inherit", // Torn's own font, like the rows around it
         width: "auto",
         padding: strip ? "6px 10px" : "5px 6px",
@@ -366,15 +377,20 @@
     }
   }
 
-  // Where to dock, from Torn's chain bar if it's on screen. Its class names
-  // carry a build hash (chain-bar___sYy8w), so match on the stable prefixes.
+  // Where to dock, from Torn's bars (energy … chain) if they're on screen.
+  // Any bar will do: the chain bar alone isn't a link while you're flying, and
+  // 1.14.0 only looked for the link, so travellers got a floating widget.
+  // Class names carry a build hash (bar-mobile___hjfT3), so match on the
+  // stable prefixes.
   //   desktop: bar < bars < sidebar block; we go at the block's end, after
   //            the bars (and TornTools' OC/RW lines, if any)
   //   mobile:  bar < bars row < user-info rows < header; we go right under
   //            the user-info rows, as a row of the header
   function sidebarSlot() {
-    const bar = document.querySelector('a[class*="chain-bar___"]');
-    if (!bar || !bar.getClientRects().length || !bar.parentElement) return null;
+    const bar = Array.from(
+      document.querySelectorAll('[class*="bar-desktop___"], [class*="bar-mobile___"]'),
+    ).find((el) => el.getClientRects().length);
+    if (!bar || !bar.parentElement) return null;
     const bars = bar.parentElement;
     if (/bar-desktop/.test(bar.className) && bars.parentElement)
       return { mode: "desktop", parent: bars.parentElement, after: null };
@@ -388,7 +404,11 @@
   // only appear after we start, and a resize can move between layouts.
   function place() {
     const slot = sidebarSlot();
-    if (slot) {
+    if (!!slot !== dockable) {
+      dockable = !!slot;
+      applyLayout();
+    }
+    if (slot && !poppedOut) {
       if (dock.parentElement !== slot.parent) {
         const hr = slot.parent.querySelector('hr[class*="delimiter___"]');
         dockHr.className = hr ? hr.className : "";
@@ -431,9 +451,19 @@
     applyLayout();
     clamp();
   }
+  function setPoppedOut(on) {
+    poppedOut = on;
+    GM_setValue("cw_float", on);
+    place();
+  }
+  popBtn.addEventListener("click", function (e) {
+    e.stopPropagation();
+    setPoppedOut(true);
+  });
   closeBtn.addEventListener("click", function (e) {
     e.stopPropagation();
-    setPill(true);
+    if (dockable) setPoppedOut(false);
+    else setPill(true);
   });
   if (typeof GM_registerMenuCommand === "function") {
     GM_registerMenuCommand("Show ChainWatch widget", function () {
@@ -500,6 +530,7 @@
     }
     const min = GM_getValue("cw_min", false);
     const pl = GM_getValue("cw_pill", false);
+    poppedOut = GM_getValue("cw_float", false); // place() picks it up this tick
     if (min !== minimized || pl !== pill) {
       minimized = min;
       pill = pl;
@@ -678,7 +709,12 @@
   // outdated install without anyone touching the server. The fallback (for
   // hosts without GM_info) must match @version, or the floor locks it out.
   const MY_VERSION =
-    (typeof GM_info !== "undefined" && GM_info.script && GM_info.script.version) || "1.14.0";
+    (typeof GM_info !== "undefined" && GM_info.script && GM_info.script.version) || "1.15.0";
+  // tucked into the bottom-right corner, faint and taking no space of its
+  // own, so a screenshot tells which build runs
+  const VERSION_TAG =
+    '<span style="position:absolute;right:5px;bottom:2px;font-size:8px;line-height:1;' +
+    'color:#5c5c5c;pointer-events:none">v' + MY_VERSION + "</span>";
   const belowFloor = () => !!(data && data.min_version && cmpVersion(MY_VERSION, data.min_version) < 0);
   const INSTALL_URL = "https://greasyfork.org/en/scripts/589168-chainwatch-saver-widget";
   function cmpVersion(a, b) {
@@ -723,7 +759,8 @@
         '<div style="color:#f87171;font-weight:700">⚠ Update required</div>' +
         '<a href="' +
         INSTALL_URL +
-        '" target="_blank" style="color:#34d399;font-weight:700;text-decoration:underline">Update the widget →</a>';
+        '" target="_blank" style="color:#34d399;font-weight:700;text-decoration:underline">Update the widget →</a>' +
+        VERSION_TAG;
       return;
     }
 
@@ -837,6 +874,7 @@
         INSTALL_URL +
         '" target="_blank" style="display:block;margin-top:3px;color:#fbbf24;font-size:10px;text-decoration:underline">⬆ Update available</a>';
     }
+    html += VERSION_TAG;
 
     body.innerHTML = html;
   }
@@ -928,7 +966,7 @@
   // Paint the last shared reading at once — but only a recent one. An old
   // reading extrapolates the timer to 0:00 and would blast a false siren for
   // the moment until the fresh fetch lands. While Torn is open some tab
-  // refreshes it every ≤15s, so page-to-page navigation still paints instantly.
+  // refreshes it every ≤5s, so page-to-page navigation still paints instantly.
   adoptShared(POLL_CALM_MS);
   render(); // apply the hide-when-small rule immediately (no first-paint flash)
   poll();

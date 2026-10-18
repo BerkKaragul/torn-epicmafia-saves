@@ -5,7 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { currentPushStatus, disablePush, enablePush, type PushStatus } from "./push";
 import { fmtClock, fmtDuration, fmtMoney } from "@/lib/format";
 import { alarmInterval, armAlarm, playAlarm, setAlarmVolume } from "@/lib/alarm";
-import { supabaseBrowser } from "@/lib/supabase-browser";
+import { subscribePoke } from "@/lib/poke";
 
 interface Me {
   member: { torn_id: number; name: string; is_admin: boolean; key_valid: boolean };
@@ -87,14 +87,11 @@ export function DutyPanel() {
     // refresh billable totals + live chain state periodically
     const r = setInterval(load, 20_000);
     // ...and immediately whenever the poller says something changed
-    const channel = supabaseBrowser()
-      ?.channel("chain")
-      .on("broadcast", { event: "poke" }, () => load())
-      .subscribe();
+    const unsubscribe = subscribePoke(() => load());
     return () => {
       clearInterval(t);
       clearInterval(r);
-      channel?.unsubscribe();
+      unsubscribe();
     };
   }, [load]);
 

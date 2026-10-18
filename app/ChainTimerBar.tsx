@@ -5,7 +5,7 @@
 // between updates so it ticks smoothly.
 
 import { useEffect, useRef, useState } from "react";
-import { supabaseBrowser } from "@/lib/supabase-browser";
+import { subscribePoke } from "@/lib/poke";
 import { fmtClock } from "@/lib/format";
 import type { StatePayload } from "@/lib/state";
 
@@ -32,17 +32,14 @@ export function ChainTimerBar() {
       }
     };
     fetchState();
-    const channel = supabaseBrowser()
-      ?.channel("chain")
-      .on("broadcast", { event: "poke" }, fetchState)
-      .subscribe();
+    const unsubscribe = subscribePoke(fetchState);
     const poll = setInterval(fetchState, 30_000);
     const tick = setInterval(
       () => setNowS(Math.floor((Date.now() + clockOffsetMs.current) / 1000)),
       250,
     );
     return () => {
-      channel?.unsubscribe();
+      unsubscribe();
       clearInterval(poll);
       clearInterval(tick);
     };

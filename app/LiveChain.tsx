@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { supabaseBrowser } from "@/lib/supabase-browser";
+import { subscribePoke } from "@/lib/poke";
 import type { StatePayload } from "@/lib/state";
 import { fmtClock } from "@/lib/format";
 import { alarmInterval, armAlarm, playAlarm, setAlarmVolume } from "@/lib/alarm";
@@ -53,14 +53,10 @@ export function LiveChain({ initial, myId }: { initial: StatePayload; myId: numb
       refetchTimer = setTimeout(fetchState, 300);
     };
 
-    const sb = supabaseBrowser();
-    const channel = sb
-      ?.channel("chain")
-      .on("broadcast", { event: "poke" }, debouncedFetch)
-      .subscribe((status) => {
-        channelUp.current = status === "SUBSCRIBED";
-        if (status === "SUBSCRIBED") debouncedFetch();
-      });
+    const unsubscribe = subscribePoke(debouncedFetch, (up) => {
+      channelUp.current = up;
+      if (up) debouncedFetch();
+    });
     const poll = setInterval(() => {
       if (!channelUp.current) fetchState();
     }, 30_000);
@@ -69,7 +65,7 @@ export function LiveChain({ initial, myId }: { initial: StatePayload; myId: numb
     };
     document.addEventListener("visibilitychange", onVisible);
     return () => {
-      channel?.unsubscribe();
+      unsubscribe();
       clearInterval(poll);
       if (refetchTimer) clearTimeout(refetchTimer);
       document.removeEventListener("visibilitychange", onVisible);

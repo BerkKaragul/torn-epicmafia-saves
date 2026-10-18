@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChainWatch Saver Widget
 // @namespace    chainwatch.epicmafia
-// @version      1.13.0
+// @version      1.14.0
 // @description  Shows the current & next chain saver (and timer) from ChainWatch, inside Torn — with the same danger siren as the site (one tab plays, not all).
 // @author       EPIC Mafia
 // @license      MIT
@@ -260,13 +260,18 @@
   // Persistent header (title + siren toggle + minimize/close) so a re-render
   // never wipes the buttons; only #cw-body is rewritten each poll. Minimized,
   // the header alone stays, with the countdown (#cw-mini) beside the title.
+  // The buttons never shrink and the title clips instead, so the countdown
+  // appearing can't push them out of a narrow sidebar.
   const HDR_BTN =
-    'data-cw-nodrag="1" style="cursor:pointer;font-size:14px;line-height:1;color:#737373;padding:0 1px"';
+    'data-cw-nodrag="1" style="flex:none;width:10px;text-align:center;cursor:pointer;font-size:14px;' +
+    'line-height:1;color:#737373"';
   box.innerHTML =
     '<div id="cw-head" style="display:flex;align-items:center;gap:6px;margin-bottom:4px">' +
-    '<b style="color:#34d399;font-size:11px;flex:1;white-space:nowrap">🔗<span id="cw-title"> ChainWatch</span> ' +
-    '<span id="cw-mini" style="display:none;font-variant-numeric:tabular-nums"></span></b>' +
-    '<span id="cw-siren" data-cw-nodrag="1" style="cursor:pointer;font-size:15px;line-height:1" ' +
+    '<b style="color:#34d399;font-size:11px;flex:1;min-width:0;overflow:hidden;white-space:nowrap">' +
+    '🔗<span id="cw-title"> ChainWatch</span> ' +
+    '<span id="cw-mini" style="display:none;font-variant-numeric:tabular-nums"></span>' +
+    '<span id="cw-who" style="display:none;color:#a3a3a3;font-weight:400"></span></b>' +
+    '<span id="cw-siren" data-cw-nodrag="1" style="flex:none;cursor:pointer;font-size:15px;line-height:1" ' +
     'title="Arm danger siren">' +
     (sirenOn ? "🔊" : "🔇") +
     "</span>" +
@@ -290,8 +295,10 @@
 
   // ── layout: docked / floating / pill ─────────────────────────────────────
   // On desktop Torn the widget sits inside the sidebar, under the bars, as part
-  // of the page. Wherever that sidebar isn't on screen (mobile, TornPDA, the
-  // Information block collapsed) it floats and can be dragged instead.
+  // of the page; on mobile Torn (TornPDA too) the sidebar is a header strip of
+  // bars, and the widget becomes one more full-width row under it. Wherever
+  // neither is on screen (Information block collapsed, a layout we don't know)
+  // it floats and can be dragged instead.
   // Floating, × shrinks it to a small tab that a tap brings back. It never
   // disappears outright: 1.12.0 hid it for the whole chain, and TornPDA has no
   // userscript menu to bring it back, so a closed widget stayed lost for days.
@@ -299,10 +306,11 @@
   // The siren keeps following its own toggle either way.
   let minimized = GM_getValue("cw_min", false);
   let pill = GM_getValue("cw_pill", false);
-  let docked = false;
+  let docked = null; // null = floating, else "desktop" / "mobile"
   const fullEl = box.querySelector("#cw-full");
   const headEl = box.querySelector("#cw-head");
   const miniEl = box.querySelector("#cw-mini");
+  const whoEl = box.querySelector("#cw-who");
   const titleEl = box.querySelector("#cw-title");
   const minBtn = box.querySelector("#cw-minbtn");
   const closeBtn = box.querySelector("#cw-close");
@@ -315,10 +323,14 @@
   function applyLayout() {
     const asPill = pill && !docked;
     const folded = minimized || asPill;
+    const strip = docked === "mobile"; // a full-width row has room to spare
     fullEl.style.display = folded ? "none" : "";
     headEl.style.marginBottom = folded ? "0" : "4px";
     miniEl.style.display = folded ? "" : "none";
-    titleEl.style.display = asPill ? "none" : "";
+    // minimized in the strip, the turn-holder rides along with the countdown
+    whoEl.style.display = folded && strip ? "" : "none";
+    // the countdown takes the name's place where space is tight
+    titleEl.style.display = asPill || (minimized && !strip) ? "none" : "";
     box.querySelector("#cw-siren").style.display = asPill ? "none" : "";
     minBtn.style.display = asPill ? "none" : "";
     closeBtn.style.display = docked || asPill ? "none" : ""; // nothing to shrink in the sidebar
@@ -330,10 +342,10 @@
         position: "static",
         fontFamily: "inherit", // Torn's own font, like the rows around it
         width: "auto",
-        padding: "5px 6px",
-        margin: "4px 0 8px",
-        background: "transparent",
-        borderRadius: "5px",
+        padding: strip ? "6px 10px" : "5px 6px",
+        margin: strip ? "0" : "4px 0 8px",
+        background: strip ? "#333" : "transparent",
+        borderRadius: strip ? "0" : "5px",
         cursor: "default",
         userSelect: "",
         touchAction: "",
@@ -354,12 +366,22 @@
     }
   }
 
-  // The chain bar, if the desktop sidebar is on screen. Torn's class names
-  // carry a build hash (chain-bar___sYy8w), so match on the stable prefix.
+  // Where to dock, from Torn's chain bar if it's on screen. Its class names
+  // carry a build hash (chain-bar___sYy8w), so match on the stable prefixes.
+  //   desktop: bar < bars < sidebar block; we go at the block's end, after
+  //            the bars (and TornTools' OC/RW lines, if any)
+  //   mobile:  bar < bars row < user-info rows < header; we go right under
+  //            the user-info rows, as a row of the header
   function sidebarSlot() {
-    const bar = document.querySelector('a[class*="chain-bar___"][class*="bar-desktop"]');
-    if (!bar || !bar.getClientRects().length) return null;
-    return bar.parentElement && bar.parentElement.parentElement; // the block holding the bars
+    const bar = document.querySelector('a[class*="chain-bar___"]');
+    if (!bar || !bar.getClientRects().length || !bar.parentElement) return null;
+    const bars = bar.parentElement;
+    if (/bar-desktop/.test(bar.className) && bars.parentElement)
+      return { mode: "desktop", parent: bars.parentElement, after: null };
+    const rows = bars.parentElement;
+    if (/bar-mobile/.test(bar.className) && rows && rows.parentElement)
+      return { mode: "mobile", parent: rows.parentElement, after: rows };
+    return null;
   }
 
   // Runs every tick: Torn re-renders the sidebar on its own and may drop us or
@@ -367,14 +389,16 @@
   function place() {
     const slot = sidebarSlot();
     if (slot) {
-      if (dock.parentElement !== slot) {
-        const hr = slot.querySelector('hr[class*="delimiter___"]');
+      if (dock.parentElement !== slot.parent) {
+        const hr = slot.parent.querySelector('hr[class*="delimiter___"]');
         dockHr.className = hr ? hr.className : "";
-        slot.appendChild(dock); // after the bars (and TornTools' OC/RW lines, if any)
+        dockHr.style.display = slot.mode === "desktop" ? "" : "none"; // the strip has its own edge
+        if (slot.after) slot.after.after(dock);
+        else slot.parent.appendChild(dock);
       }
       if (box.parentElement !== dock) dock.appendChild(box);
-      if (!docked) {
-        docked = true;
+      if (docked !== slot.mode) {
+        docked = slot.mode;
         applyLayout();
       }
     } else {
@@ -383,7 +407,7 @@
         document.body.appendChild(box);
       }
       if (docked) {
-        docked = false;
+        docked = null;
         const p = GM_getValue("cw_pos", { top: 120, left: 8 });
         box.style.top = p.top + "px";
         box.style.left = p.left + "px";
@@ -654,7 +678,7 @@
   // outdated install without anyone touching the server. The fallback (for
   // hosts without GM_info) must match @version, or the floor locks it out.
   const MY_VERSION =
-    (typeof GM_info !== "undefined" && GM_info.script && GM_info.script.version) || "1.13.0";
+    (typeof GM_info !== "undefined" && GM_info.script && GM_info.script.version) || "1.14.0";
   const belowFloor = () => !!(data && data.min_version && cmpVersion(MY_VERSION, data.min_version) < 0);
   const INSTALL_URL = "https://greasyfork.org/en/scripts/589168-chainwatch-saver-widget";
   function cmpVersion(a, b) {
@@ -721,6 +745,11 @@
     const timerColor = critical ? "#f87171" : danger ? "#fbbf24" : "#34d399";
     miniEl.textContent = live ? fmt(remaining) : c.cooldown_s > 0 ? "cooldown" : "";
     miniEl.style.color = timerColor;
+    whoEl.textContent = !data.saving_enabled
+      ? ""
+      : data.on_duty > 0
+        ? " · 🛡 " + (data.turn || "?") + (data.next ? " → " + data.next : "")
+        : " · 🚨 no savers";
 
     // scary like the site: glow the box red while the chain is in danger
     if (danger) {

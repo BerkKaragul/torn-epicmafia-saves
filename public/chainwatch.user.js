@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChainWatch Saver Widget
 // @namespace    chainwatch.epicmafia
-// @version      1.15.0
+// @version      1.15.1
 // @description  Shows the current & next chain saver (and timer) from ChainWatch, inside Torn — with the same danger siren as the site (one tab plays, not all).
 // @author       EPIC Mafia
 // @license      MIT
@@ -709,7 +709,7 @@
   // outdated install without anyone touching the server. The fallback (for
   // hosts without GM_info) must match @version, or the floor locks it out.
   const MY_VERSION =
-    (typeof GM_info !== "undefined" && GM_info.script && GM_info.script.version) || "1.15.0";
+    (typeof GM_info !== "undefined" && GM_info.script && GM_info.script.version) || "1.15.1";
   // tucked into the bottom-right corner, faint and taking no space of its
   // own, so a screenshot tells which build runs
   const VERSION_TAG =
@@ -744,9 +744,29 @@
     adoptNewer();
     const link = SITE + "/duty";
 
-    if (!data) {
+    // No fresh reading: never count down a frozen one. 1.15.0 kept painting
+    // the last copy it had (for some, the final Supabase reading) when it
+    // couldn't reach the server, so the timer sat at 0:00 — and could siren.
+    // Say so instead, with the reason, and keep quiet.
+    if (!data || Date.now() - dataAt > STALE_MS) {
       updateSiren(false, false, false);
-      box.style.display = "none";
+      if (!lastError) {
+        box.style.display = "none"; // nothing fetched yet, nothing wrong yet
+        return;
+      }
+      box.style.display = "";
+      box.style.borderColor = docked ? "#555" : "#10b981";
+      box.style.boxShadow = docked ? "none" : "0 4px 14px rgba(0,0,0,.5)";
+      miniEl.textContent = "offline";
+      miniEl.style.color = "#a3a3a3";
+      whoEl.textContent = "";
+      body.innerHTML =
+        '<div style="color:#fbbf24;font-weight:700">⚠ Can&#39;t reach ChainWatch</div>' +
+        '<div style="color:#a3a3a3;font-size:10px">' +
+        lastError +
+        (data ? " · last update " + fmt((Date.now() - dataAt) / 1000) + " ago" : "") +
+        "</div>" +
+        VERSION_TAG;
       return;
     }
 
@@ -886,9 +906,16 @@
   // tabs and page loads): a tab only fetches when nobody has within the
   // current cadence, otherwise it adopts the shared copy. A freshly loaded
   // page also paints from it at once instead of fetching.
-  const SHARED_KEY = "cw_feed"; // { at, data, off } — the last reading, and when
-  const CLAIM_KEY = "cw_feed_claim"; // ms when some tab started a fetch
+  // Keyed by feed source: TornPDA gives every userscript one storage, so an
+  // old copy left installed beside this one wrote Supabase's frozen reading
+  // into "cw_feed" and 1.15.0 counted it down to 0:00.
+  const SHARED_KEY = "cw_feed_vps"; // { at, data, off } — the last reading, and when
+  const CLAIM_KEY = "cw_feed_vps_claim"; // ms when some tab started a fetch
   let dataAt = 0; // local ms when our current reading was fetched (by any tab)
+  let lastError = ""; // why our last fetch failed, shown when we go stale
+  // older than this and a reading isn't shown at all (the server refreshes the
+  // chain every ~10s, so a minute without one means we've lost it)
+  const STALE_MS = 60000;
   function adoptShared(maxAgeMs) {
     const sh = GM_getValue(SHARED_KEY, null);
     if (!sh || !sh.data || Date.now() - sh.at >= maxAgeMs) return false;
@@ -901,7 +928,7 @@
   // in step with whichever one is doing the fetching
   function adoptNewer() {
     const sh = GM_getValue(SHARED_KEY, null);
-    if (sh && sh.data && sh.at > dataAt) adoptShared(Infinity);
+    if (sh && sh.data && sh.at > dataAt) adoptShared(STALE_MS);
   }
 
   function poll() {
@@ -919,11 +946,13 @@
       timeout: 10000,
       onload: function (r) {
         syncClock(r.responseHeaders);
+        lastError = "server replied " + r.status;
         try {
           const j = JSON.parse(r.responseText);
           if (j && j.ok) {
             data = j;
             dataAt = Date.now();
+            lastError = "";
             GM_setValue(SHARED_KEY, { at: dataAt, data: j, off: clockOffsetMs });
           }
         } catch (e) {
@@ -931,8 +960,14 @@
         }
         render();
       },
+      // keep showing last known data (while it's fresh), and remember why
       onerror: function () {
-        /* keep showing last known data */
+        lastError = "connection blocked or offline";
+        render();
+      },
+      ontimeout: function () {
+        lastError = "server timed out";
+        render();
       },
     });
   }

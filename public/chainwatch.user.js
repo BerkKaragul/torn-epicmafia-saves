@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChainWatch Saver Widget
 // @namespace    chainwatch.epicmafia
-// @version      1.15.1
+// @version      1.15.2
 // @description  Shows the current & next chain saver (and timer) from ChainWatch, inside Torn — with the same danger siren as the site (one tab plays, not all).
 // @author       EPIC Mafia
 // @license      MIT
@@ -11,7 +11,8 @@
 // @grant        GM_setValue
 // @grant        GM_setClipboard
 // @grant        GM_registerMenuCommand
-// @connect      91-98-237-108.sslip.io
+// @connect      cw.cloum.com
+// @connect      torn-epicmafia-saves.vercel.app
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -24,9 +25,10 @@
   // The live feed is read straight from the ChainWatch server (a public,
   // read-only RPC), not through the site: polling the site cost a Vercel
   // function call per poll. It moved off Supabase in 1.15.0 when the free
-  // plan's traffic quota ran out. The anon key is public by design — every
-  // table is locked behind RLS and this one function is all it can reach.
-  const FEED_URL = "https://91-98-237-108.sslip.io/rest/v1/rpc/widget_feed";
+  // plan's traffic quota ran out, and from sslip.io to our own name behind
+  // Cloudflare in 1.15.2. The anon key is public by design — every table is
+  // locked behind RLS and this one function is all it can reach.
+  const FEED_URL = "https://cw.cloum.com/rest/v1/rpc/widget_feed";
   const FEED_KEY =
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYW5vbiIsImlzcyI6ImNoYWlud2F0Y2giLCJpYXQiOjE3OTIzMjA5MjIsImV4cCI6MjQyMzA0MDkyMn0.qnKJI-EMIUiipNseJHLK1EhnPb4HYu5YB6Kx2KJ_TUc";
   // Adaptive cadence: relaxed while the chain is healthy, tight in the danger
@@ -37,6 +39,14 @@
   const POLL_IDLE_MS = 60000;
   const POLL_CALM_MS = 5000;
   const POLL_DANGER_MS = 3000;
+  // Fallback road for networks that block the backend's hostname (a Romanian
+  // ISP blocked sslip.io, 1.15.0's): the same feed, proxied by the site's own address,
+  // which every member can reach. It runs on Vercel's quota, so it keeps
+  // 1.14.0's pace, and the direct road is retried every few minutes.
+  const FALLBACK_URL = SITE + "/feed";
+  const FALLBACK_CALM_MS = 15000;
+  const FALLBACK_DANGER_MS = 5000;
+  const DIRECT_RETRY_MS = 10 * 60 * 1000;
   // Hide the whole widget for small/no chains — only chains worth saving (≥10)
   // are shown, so it's off the screen when nothing's happening.
   const HIDE_BELOW_CHAIN = 10;
@@ -709,7 +719,7 @@
   // outdated install without anyone touching the server. The fallback (for
   // hosts without GM_info) must match @version, or the floor locks it out.
   const MY_VERSION =
-    (typeof GM_info !== "undefined" && GM_info.script && GM_info.script.version) || "1.15.1";
+    (typeof GM_info !== "undefined" && GM_info.script && GM_info.script.version) || "1.15.2";
   // tucked into the bottom-right corner, faint and taking no space of its
   // own, so a screenshot tells which build runs
   const VERSION_TAG =
@@ -931,6 +941,10 @@
     if (sh && sh.data && sh.at > dataAt) adoptShared(STALE_MS);
   }
 
+  // since when this browser has been going round by the site, 0 = direct;
+  // shared, so every tab takes the road that works
+  const viaSite = () => Date.now() - GM_getValue("cw_via_site", 0) < DIRECT_RETRY_MS;
+
   function poll() {
     // a little slack so a tab whose timer lands just before the cadence is up
     // still adopts the copy instead of fetching again
@@ -939,35 +953,47 @@
       return;
     }
     GM_setValue(CLAIM_KEY, Date.now());
+    fetchFeed(viaSite());
+  }
+
+  function fetchFeed(fallback) {
+    // the direct road failing (blocked, or a block page that isn't our JSON)
+    // sends this browser round by the site, at once
+    const failed = function (why) {
+      lastError = why;
+      if (!fallback) {
+        GM_setValue("cw_via_site", Date.now());
+        fetchFeed(true);
+        return;
+      }
+      render();
+    };
     GM_xmlhttpRequest({
       method: "GET",
-      url: FEED_URL,
+      url: fallback ? FALLBACK_URL : FEED_URL,
       headers: { apikey: FEED_KEY },
       timeout: 10000,
       onload: function (r) {
-        syncClock(r.responseHeaders);
-        lastError = "server replied " + r.status;
+        let j = null;
         try {
-          const j = JSON.parse(r.responseText);
-          if (j && j.ok) {
-            data = j;
-            dataAt = Date.now();
-            lastError = "";
-            GM_setValue(SHARED_KEY, { at: dataAt, data: j, off: clockOffsetMs });
-          }
+          j = JSON.parse(r.responseText);
         } catch (e) {
-          /* keep showing last known data */
+          /* not our feed */
         }
+        if (!j || !j.ok) return failed("server replied " + r.status);
+        syncClock(r.responseHeaders);
+        data = j;
+        dataAt = Date.now();
+        lastError = "";
+        GM_setValue(SHARED_KEY, { at: dataAt, data: j, off: clockOffsetMs });
         render();
       },
       // keep showing last known data (while it's fresh), and remember why
       onerror: function () {
-        lastError = "connection blocked or offline";
-        render();
+        failed("connection blocked or offline");
       },
       ontimeout: function () {
-        lastError = "server timed out";
-        render();
+        failed("server timed out");
       },
     });
   }
@@ -984,10 +1010,11 @@
         const remaining = c.observed_at
           ? Math.max(0, c.timeout_s - (nowS() - c.observed_at))
           : c.timeout_s;
-        if (remaining <= (data.alert_threshold_s || 90)) return POLL_DANGER_MS;
+        if (remaining <= (data.alert_threshold_s || 90))
+          return viaSite() ? FALLBACK_DANGER_MS : POLL_DANGER_MS;
       }
     }
-    return POLL_CALM_MS;
+    return viaSite() ? FALLBACK_CALM_MS : POLL_CALM_MS;
   }
   let pollTimer = null;
   function scheduleNextPoll() {

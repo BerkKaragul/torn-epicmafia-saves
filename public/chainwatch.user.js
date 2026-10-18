@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChainWatch Saver Widget
 // @namespace    chainwatch.epicmafia
-// @version      1.12.0
+// @version      1.13.0
 // @description  Shows the current & next chain saver (and timer) from ChainWatch, inside Torn — with the same danger siren as the site (one tab plays, not all).
 // @author       EPIC Mafia
 // @license      MIT
@@ -37,8 +37,7 @@
   const POLL_CALM_MS = 15000;
   const POLL_DANGER_MS = 5000;
   // Hide the whole widget for small/no chains — only chains worth saving (≥10)
-  // are shown. Doubles as the "get it off my screen when nothing's happening"
-  // ask, so no separate close button is needed.
+  // are shown, so it's off the screen when nothing's happening.
   const HIDE_BELOW_CHAIN = 10;
 
   // ── danger siren ─────────────────────────────────────────────────────────
@@ -265,14 +264,14 @@
     'data-cw-nodrag="1" style="cursor:pointer;font-size:14px;line-height:1;color:#737373;padding:0 1px"';
   box.innerHTML =
     '<div id="cw-head" style="display:flex;align-items:center;gap:6px;margin-bottom:4px">' +
-    '<b style="color:#34d399;font-size:11px;flex:1;white-space:nowrap">🔗 ChainWatch ' +
+    '<b style="color:#34d399;font-size:11px;flex:1;white-space:nowrap">🔗<span id="cw-title"> ChainWatch</span> ' +
     '<span id="cw-mini" style="display:none;font-variant-numeric:tabular-nums"></span></b>' +
     '<span id="cw-siren" data-cw-nodrag="1" style="cursor:pointer;font-size:15px;line-height:1" ' +
     'title="Arm danger siren">' +
     (sirenOn ? "🔊" : "🔇") +
     "</span>" +
     '<span id="cw-minbtn" ' + HDR_BTN + ">–</span>" +
-    '<span id="cw-close" ' + HDR_BTN + ' title="Hide until the next chain">×</span>' +
+    '<span id="cw-close" ' + HDR_BTN + ' title="Shrink to a small tab">×</span>' +
     "</div>" +
     '<div id="cw-full">' +
     '<input id="cw-vol" data-cw-nodrag="1" type="range" min="0" max="100" ' +
@@ -289,46 +288,134 @@
     "</div>";
   document.body.appendChild(box);
 
-  // ── minimize / close ──────────────────────────────────────────────────────
-  // Both live in GM storage so every tab follows (re-read in syncSettings).
-  // Close hides the widget for the CURRENT chain only — it comes back by itself
-  // when the next chain starts, so nobody loses it for good. To bring it back
-  // sooner: the userscript manager's menu → "Show ChainWatch widget".
+  // ── layout: docked / floating / pill ─────────────────────────────────────
+  // On desktop Torn the widget sits inside the sidebar, under the bars, as part
+  // of the page. Wherever that sidebar isn't on screen (mobile, TornPDA, the
+  // Information block collapsed) it floats and can be dragged instead.
+  // Floating, × shrinks it to a small tab that a tap brings back. It never
+  // disappears outright: 1.12.0 hid it for the whole chain, and TornPDA has no
+  // userscript menu to bring it back, so a closed widget stayed lost for days.
+  // Minimize and pill live in GM storage so every tab follows (syncSettings).
   // The siren keeps following its own toggle either way.
   let minimized = GM_getValue("cw_min", false);
-  let closedChain = GM_getValue("cw_closed", 0); // chain id hidden for, 0 = none
+  let pill = GM_getValue("cw_pill", false);
+  let docked = false;
   const fullEl = box.querySelector("#cw-full");
   const headEl = box.querySelector("#cw-head");
   const miniEl = box.querySelector("#cw-mini");
+  const titleEl = box.querySelector("#cw-title");
   const minBtn = box.querySelector("#cw-minbtn");
-  function applyMinimized() {
-    fullEl.style.display = minimized ? "none" : "";
-    headEl.style.marginBottom = minimized ? "0" : "4px";
-    miniEl.style.display = minimized ? "" : "none";
+  const closeBtn = box.querySelector("#cw-close");
+  // docked: the widget plus a divider styled like Torn's own, so it reads as
+  // one more section of the sidebar
+  const dock = document.createElement("div");
+  const dockHr = document.createElement("hr");
+  dock.appendChild(dockHr);
+
+  function applyLayout() {
+    const asPill = pill && !docked;
+    const folded = minimized || asPill;
+    fullEl.style.display = folded ? "none" : "";
+    headEl.style.marginBottom = folded ? "0" : "4px";
+    miniEl.style.display = folded ? "" : "none";
+    titleEl.style.display = asPill ? "none" : "";
+    box.querySelector("#cw-siren").style.display = asPill ? "none" : "";
+    minBtn.style.display = asPill ? "none" : "";
+    closeBtn.style.display = docked || asPill ? "none" : ""; // nothing to shrink in the sidebar
     minBtn.textContent = minimized ? "+" : "–";
     minBtn.title = minimized ? "Expand" : "Minimize";
+    box.title = asPill ? "Tap to open ChainWatch" : "";
+    if (docked) {
+      Object.assign(box.style, {
+        position: "static",
+        fontFamily: "inherit", // Torn's own font, like the rows around it
+        width: "auto",
+        padding: "5px 6px",
+        margin: "4px 0 8px",
+        background: "transparent",
+        borderRadius: "5px",
+        cursor: "default",
+        userSelect: "",
+        touchAction: "",
+      });
+    } else {
+      Object.assign(box.style, {
+        position: "fixed",
+        fontFamily: "system-ui, sans-serif",
+        width: asPill ? "auto" : "168px",
+        padding: asPill ? "4px 9px" : "8px 10px",
+        margin: "0",
+        background: "#0a0a0a",
+        borderRadius: asPill ? "14px" : "10px",
+        cursor: "grab",
+        userSelect: "none",
+        touchAction: "none", // let us handle touch-drag instead of the page scrolling
+      });
+    }
   }
-  applyMinimized();
+
+  // The chain bar, if the desktop sidebar is on screen. Torn's class names
+  // carry a build hash (chain-bar___sYy8w), so match on the stable prefix.
+  function sidebarSlot() {
+    const bar = document.querySelector('a[class*="chain-bar___"][class*="bar-desktop"]');
+    if (!bar || !bar.getClientRects().length) return null;
+    return bar.parentElement && bar.parentElement.parentElement; // the block holding the bars
+  }
+
+  // Runs every tick: Torn re-renders the sidebar on its own and may drop us or
+  // only appear after we start, and a resize can move between layouts.
+  function place() {
+    const slot = sidebarSlot();
+    if (slot) {
+      if (dock.parentElement !== slot) {
+        const hr = slot.querySelector('hr[class*="delimiter___"]');
+        dockHr.className = hr ? hr.className : "";
+        slot.appendChild(dock); // after the bars (and TornTools' OC/RW lines, if any)
+      }
+      if (box.parentElement !== dock) dock.appendChild(box);
+      if (!docked) {
+        docked = true;
+        applyLayout();
+      }
+    } else {
+      if (box.parentElement !== document.body) {
+        dock.remove();
+        document.body.appendChild(box);
+      }
+      if (docked) {
+        docked = false;
+        const p = GM_getValue("cw_pos", { top: 120, left: 8 });
+        box.style.top = p.top + "px";
+        box.style.left = p.left + "px";
+        applyLayout();
+        clamp();
+      }
+    }
+    dock.style.display = box.style.display; // the divider goes with the widget
+  }
+  applyLayout();
+
   minBtn.addEventListener("click", function (e) {
     e.stopPropagation();
     minimized = !minimized;
     GM_setValue("cw_min", minimized);
-    applyMinimized();
+    applyLayout();
   });
-  box.querySelector("#cw-close").addEventListener("click", function (e) {
+  function setPill(on) {
+    pill = on;
+    GM_setValue("cw_pill", on);
+    applyLayout();
+    clamp();
+  }
+  closeBtn.addEventListener("click", function (e) {
     e.stopPropagation();
-    closedChain = (data && data.chain && data.chain.id) || 0;
-    GM_setValue("cw_closed", closedChain);
-    render();
+    setPill(true);
   });
   if (typeof GM_registerMenuCommand === "function") {
     GM_registerMenuCommand("Show ChainWatch widget", function () {
-      closedChain = 0;
       minimized = false;
-      GM_setValue("cw_closed", 0);
       GM_setValue("cw_min", false);
-      applyMinimized();
-      render();
+      setPill(false);
     });
   }
 
@@ -388,11 +475,12 @@
       volSlider.value = Math.round(sirenVol * 100);
     }
     const min = GM_getValue("cw_min", false);
-    if (min !== minimized) {
+    const pl = GM_getValue("cw_pill", false);
+    if (min !== minimized || pl !== pill) {
       minimized = min;
-      applyMinimized();
+      pill = pl;
+      applyLayout();
     }
-    closedChain = GM_getValue("cw_closed", 0);
   }
 
   // optional "I'm here" button (delegated — the body is re-rendered each poll):
@@ -431,13 +519,17 @@
 
   // keep it on-screen (handy when switching between PC and mobile)
   function clamp() {
+    if (docked) return;
     const maxL = Math.max(0, window.innerWidth - box.offsetWidth);
     const maxT = Math.max(0, window.innerHeight - box.offsetHeight);
     box.style.left = Math.min(box.offsetLeft, maxL) + "px";
     box.style.top = Math.min(box.offsetTop, maxT) + "px";
   }
   clamp();
-  window.addEventListener("resize", clamp);
+  window.addEventListener("resize", function () {
+    place();
+    clamp();
+  });
 
   // drag to reposition (persisted). Pointer Events + pointer-capture is the
   // one approach that reliably works in mobile webviews like TornPDA; touch/
@@ -450,21 +542,35 @@
   }
 
   function moveTo(px, py) {
+    // a few pixels of wobble is still a tap, not a drag
+    if (Math.abs(px - drag.sx) + Math.abs(py - drag.sy) > 5) drag.moved = true;
     const maxL = Math.max(0, window.innerWidth - box.offsetWidth);
     const maxT = Math.max(0, window.innerHeight - box.offsetHeight);
     box.style.left = Math.min(Math.max(0, px - drag.x), maxL) + "px";
     box.style.top = Math.min(Math.max(0, py - drag.y), maxT) + "px";
   }
-  function persist() {
+  function persist(e) {
+    if (!drag) return;
+    const tapped = !drag.moved && !(e && /cancel/.test(e.type));
     drag = null;
     box.style.cursor = "grab";
+    if (tapped) {
+      if (pill) setPill(false); // the pill opens on a tap
+      return;
+    }
     GM_setValue("cw_pos", { top: box.offsetTop, left: box.offsetLeft });
   }
 
   if (window.PointerEvent) {
     box.addEventListener("pointerdown", function (e) {
-      if (noDrag(e.target)) return; // let the link / siren button be tapped
-      drag = { x: e.clientX - box.offsetLeft, y: e.clientY - box.offsetTop, id: e.pointerId };
+      if (docked || noDrag(e.target)) return; // let the link / siren button be tapped
+      drag = {
+        x: e.clientX - box.offsetLeft,
+        y: e.clientY - box.offsetTop,
+        sx: e.clientX,
+        sy: e.clientY,
+        id: e.pointerId,
+      };
       try {
         box.setPointerCapture(e.pointerId); // route all further moves to the box
       } catch (_) {}
@@ -481,16 +587,16 @@
       try {
         box.releasePointerCapture(drag.id);
       } catch (_) {}
-      persist();
+      persist(e);
     };
     box.addEventListener("pointerup", up);
     box.addEventListener("pointercancel", up);
   } else {
     const pt = (e) => (e.touches && e.touches[0] ? e.touches[0] : e);
     const start = function (e) {
-      if (noDrag(e.target)) return;
+      if (docked || noDrag(e.target)) return;
       const p = pt(e);
-      drag = { x: p.x - box.offsetLeft, y: p.y - box.offsetTop };
+      drag = { x: p.x - box.offsetLeft, y: p.y - box.offsetTop, sx: p.x, sy: p.y };
       box.style.cursor = "grabbing";
     };
     const move = function (e) {
@@ -548,7 +654,7 @@
   // outdated install without anyone touching the server. The fallback (for
   // hosts without GM_info) must match @version, or the floor locks it out.
   const MY_VERSION =
-    (typeof GM_info !== "undefined" && GM_info.script && GM_info.script.version) || "1.12.0";
+    (typeof GM_info !== "undefined" && GM_info.script && GM_info.script.version) || "1.13.0";
   const belowFloor = () => !!(data && data.min_version && cmpVersion(MY_VERSION, data.min_version) < 0);
   const INSTALL_URL = "https://greasyfork.org/en/scripts/589168-chainwatch-saver-widget";
   function cmpVersion(a, b) {
@@ -567,7 +673,12 @@
   }
 
   function render() {
-    const body = document.getElementById("cw-body");
+    paint();
+    place();
+  }
+
+  function paint() {
+    const body = box.querySelector("#cw-body");
     if (!body) return;
     syncSettings();
     adoptNewer();
@@ -599,7 +710,7 @@
       box.style.display = "none";
       return;
     }
-    box.style.display = closedChain && closedChain === c.id ? "none" : "";
+    box.style.display = "";
 
     const live = c.id > 0 && c.current > 0 && c.cooldown_s === 0;
     // extrapolate from when the poller last observed the timer (server clock)
@@ -616,8 +727,9 @@
       box.style.borderColor = critical ? "#ef4444" : "#f59e0b";
       box.style.boxShadow = "0 0 14px " + (critical ? "rgba(239,68,68,.7)" : "rgba(245,158,11,.55)");
     } else {
-      box.style.borderColor = "#10b981";
-      box.style.boxShadow = "0 4px 14px rgba(0,0,0,.5)";
+      // docked, a quiet border like the rest of the sidebar; it still lights up
+      box.style.borderColor = docked ? "#555" : "#10b981";
+      box.style.boxShadow = docked ? "none" : "0 4px 14px rgba(0,0,0,.5)";
     }
 
     // "only when I'm saving" mutes the sound (not the visuals) unless it's

@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { applyTheme, readThemePref, THEME_KEY, type ThemePref } from "./theme";
+import { useActiveEvent } from "./EventContext";
 
 const ORDER: ThemePref[] = ["system", "light", "dark"];
 const LABEL: Record<ThemePref, { icon: string; title: string }> = {
@@ -15,6 +16,8 @@ export function ThemeToggle() {
   // choice into the button. Starting at the default and correcting in an effect
   // keeps the server and client markup identical.
   const [pref, setPref] = useState<ThemePref>("system");
+  // an event theme replaces light/dark while it runs, so there's nothing to pick
+  const eventTheme = useActiveEvent()?.theme === "halloween";
 
   useEffect(() => {
     const stored = readThemePref();
@@ -43,6 +46,8 @@ export function ThemeToggle() {
       // storage blocked: the choice still applies for this page's lifetime
     }
   }
+
+  if (eventTheme) return null;
 
   return (
     <button

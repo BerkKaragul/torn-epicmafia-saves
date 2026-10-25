@@ -5,6 +5,7 @@ import { fmtMoney } from "@/lib/format";
 import { downloadCsv } from "@/lib/download";
 import { downloadPayoutPdf, unitRateLine, type PayoutTotals } from "@/lib/payoutPdf";
 import { actionValues, normalizeConfig, type WarPayoutRow } from "@/lib/warPayout";
+import type { EventPayoutLine, EventPayoutTotals } from "@/lib/types";
 
 interface SavedPayout {
   torn_war_id: number;
@@ -23,12 +24,26 @@ interface SavedPayout {
   members: { name: string } | null;
 }
 
+// a frozen event payout (paid saving with no ranked war)
+interface SavedEventPayout {
+  id: number;
+  name: string;
+  started_at: string;
+  ends_at: string;
+  ended_at: string | null;
+  payout_lines: EventPayoutLine[];
+  payout_totals: EventPayoutTotals;
+  payout_saved_at: string;
+  members: { name: string } | null;
+}
+
 const fmtDate = (iso: string | null) =>
   iso ? new Date(iso).toLocaleDateString(undefined, { dateStyle: "medium" }) : "—";
 const fmtNum = (n: number) => Number(n).toLocaleString(undefined, { maximumFractionDigits: 0 });
 
 export function PayoutsArchive({ meId, isAdmin }: { meId: number; isAdmin: boolean }) {
   const [payouts, setPayouts] = useState<SavedPayout[] | null>(null);
+  const [events, setEvents] = useState<SavedEventPayout[]>([]);
   const [open, setOpen] = useState<number | null>(null);
   // Building a PDF pulls ~400KB of jsPDF over the wire and then lays out every
   // member. On a phone that is not instant, and a button that looks inert is a
@@ -42,6 +57,7 @@ export function PayoutsArchive({ meId, isAdmin }: { meId: number; isAdmin: boole
     const body = await res.json().catch(() => ({}));
     const list: SavedPayout[] = res.ok ? (body.payouts ?? []) : [];
     setPayouts(list);
+    setEvents(res.ok ? (body.events ?? []) : []);
     // the newest war is what people come here for — open it straight away
     if (list.length > 0) setOpen((cur) => cur ?? list[0].torn_war_id);
   }, []);
@@ -108,7 +124,7 @@ export function PayoutsArchive({ meId, isAdmin }: { meId: number; isAdmin: boole
     return <p className="text-sm text-neutral-500">Loading…</p>;
   }
 
-  if (payouts.length === 0) {
+  if (payouts.length === 0 && events.length === 0) {
     return (
       <div className="rounded-xl border border-neutral-800 bg-neutral-900 p-6">
         <h2 className="font-bold">No payouts published yet</h2>
@@ -129,6 +145,10 @@ export function PayoutsArchive({ meId, isAdmin }: { meId: number; isAdmin: boole
           of the prize pool. Your own row is highlighted.
         </p>
       </div>
+
+      {events.map((e) => (
+        <EventPayoutCard key={`event-${e.id}`} e={e} meId={meId} />
+      ))}
 
       {payouts.map((p) => {
         const cfg = normalizeConfig(p.config);
@@ -323,5 +343,84 @@ export function PayoutsArchive({ meId, isAdmin }: { meId: number; isAdmin: boole
         );
       })}
     </div>
+  );
+}
+
+/** One frozen event payout: hourly chain pay + saves at the event's flat rate. */
+function EventPayoutCard({ e, meId }: { e: SavedEventPayout; meId: number }) {
+  const [open, setOpen] = useState(false);
+  const mine = e.payout_lines.find((l) => Number(l.member_id) === meId);
+  const t = e.payout_totals;
+  return (
+    <section className="rounded-xl border border-orange-800 bg-neutral-900">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 p-5">
+        <button onClick={() => setOpen(!open)} className="flex items-baseline gap-2 text-left">
+          <span className="text-neutral-600">{open ? "▾" : "▸"}</span>
+          <h2 className="font-bold">🎃 {e.name}</h2>
+          <span className="text-xs text-neutral-500">
+            {fmtDate(e.started_at)} → {fmtDate(e.ended_at ?? e.ends_at)}
+          </span>
+        </button>
+        <span className="text-lg font-black tabular-nums text-orange-400">{fmtMoney(t.grand)}</span>
+        <span className="text-xs text-neutral-500">across {t.members} member(s)</span>
+        {mine && (
+          <span className="rounded-md border border-emerald-800 bg-emerald-950/50 px-2.5 py-1 text-xs font-semibold text-emerald-300">
+            You earned {fmtMoney(mine.total)}
+          </span>
+        )}
+      </div>
+      {open && (
+        <div className="border-t border-neutral-800 px-5 pb-5 pt-4">
+          <p className="text-xs text-neutral-600">
+            hourly {fmtMoney(t.chain)} + {t.saves} save(s) × {fmtMoney(t.save_bonus)} ={" "}
+            {fmtMoney(t.saves_pay)} · locked {fmtDate(e.payout_saved_at)}
+            {e.members?.name ? ` by ${e.members.name}` : ""}
+          </p>
+          <div className="mt-3 overflow-x-auto">
+            <table className="w-full text-left text-sm">
+              <thead className="text-xs uppercase text-neutral-500">
+                <tr>
+                  <th className="py-1.5 pr-3">Member</th>
+                  <th className="py-1.5 pr-3">Hours</th>
+                  <th className="py-1.5 pr-3">Hourly $</th>
+                  <th className="py-1.5 pr-3">Saves</th>
+                  <th className="py-1.5 pr-3">Saves $</th>
+                  <th className="py-1.5">Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {e.payout_lines.map((l) => {
+                  const isMe = Number(l.member_id) === meId;
+                  return (
+                    <tr
+                      key={l.member_id}
+                      className={`border-t border-neutral-800 ${isMe ? "bg-emerald-950/30" : ""}`}
+                    >
+                      <td className={`py-2 pr-3 font-medium ${isMe ? "text-emerald-200" : ""}`}>
+                        {l.name}
+                        {isMe && <span className="ml-1.5 text-xs text-emerald-500">you</span>}
+                      </td>
+                      <td className="py-2 pr-3 tabular-nums text-neutral-400">
+                        {(l.save_seconds / 3600).toFixed(1)}
+                      </td>
+                      <td className="py-2 pr-3 tabular-nums text-neutral-500">
+                        {fmtMoney(l.chain_pay)}
+                      </td>
+                      <td className="py-2 pr-3 tabular-nums text-emerald-400">{l.saves || "—"}</td>
+                      <td className="py-2 pr-3 tabular-nums text-neutral-500">
+                        {fmtMoney(l.saves_pay)}
+                      </td>
+                      <td className="py-2 font-bold tabular-nums text-emerald-300">
+                        {fmtMoney(l.total)}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </section>
   );
 }

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useActiveEvent } from "./EventContext";
 
 // Decorative random cat GIFs in the four corners, pulled live from Giphy. Fixed,
 // pointer-events-none and only mounted on wide screens (phones skip the fetch
@@ -21,6 +22,9 @@ interface GiphyResp {
 }
 
 export function Decor() {
+  // during the Halloween event the corner GIFs turn spooky too
+  const halloween = useActiveEvent()?.theme === "halloween";
+  const query = halloween ? "halloween cat" : "cat";
   const [on, setOn] = useState(false);
   const [wide, setWide] = useState(false);
   const [ready, setReady] = useState(false);
@@ -47,7 +51,7 @@ export function Decor() {
     (async () => {
       try {
         const res = await fetch(
-          `https://api.giphy.com/v1/gifs/search?api_key=${GIPHY_KEY}&q=cat&limit=50&rating=g&bundle=fixed_height`,
+          `https://api.giphy.com/v1/gifs/search?api_key=${GIPHY_KEY}&q=${encodeURIComponent(query)}&limit=50&rating=g&bundle=fixed_height`,
         );
         const json: GiphyResp = await res.json();
         const urls = (json.data ?? [])
@@ -65,7 +69,7 @@ export function Decor() {
     return () => {
       alive = false;
     };
-  }, [ready, wide, on, gifs.length]);
+  }, [ready, wide, on, gifs.length, query]);
 
   function toggle() {
     setOn((prev) => {
@@ -110,7 +114,7 @@ export function Decor() {
             on ? "opacity-80" : "opacity-60"
           }`}
         >
-          {on ? "🐱 Hide cats" : "🐱 Show cats"}
+          {halloween ? (on ? "🎃 Hide cats" : "🎃 Show cats") : on ? "🐱 Hide cats" : "🐱 Show cats"}
         </button>
       )}
     </>

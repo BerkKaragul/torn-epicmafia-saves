@@ -3,24 +3,31 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ThemeToggle } from "./ThemeToggle";
+import { useActiveEvent } from "./EventContext";
 
 export function Nav({
   current,
   isAdmin,
   name,
 }: {
-  current: "live" | "duty" | "admin" | "war-payout" | "payouts";
+  current: "live" | "duty" | "event" | "admin" | "war-payout" | "payouts";
   isAdmin: boolean;
   name: string;
 }) {
   const router = useRouter();
-  const tab = (key: string, href: string, label: string) => (
+  // during an event, saving happens on the event page — it replaces "My duty"
+  const event = useActiveEvent();
+  const tab = (key: string, href: string, label: string, accent = false) => (
     <Link
       href={href}
       className={`rounded-md px-3 py-1.5 text-sm font-medium transition ${
         current === key
-          ? "bg-neutral-800 text-neutral-50"
-          : "text-neutral-400 hover:bg-neutral-900 hover:text-neutral-200"
+          ? accent
+            ? "bg-orange-600 text-white"
+            : "bg-neutral-800 text-neutral-50"
+          : accent
+            ? "text-orange-300 hover:bg-orange-950/60 hover:text-orange-200"
+            : "text-neutral-400 hover:bg-neutral-900 hover:text-neutral-200"
       }`}
     >
       {label}
@@ -36,7 +43,7 @@ export function Nav({
   return (
     <nav className="mb-6 flex items-center gap-1 border-b border-neutral-800 pb-3">
       {tab("live", "/", "Live chain")}
-      {tab("duty", "/duty", "My duty")}
+      {event ? tab("event", "/event", "🎃 Event", true) : tab("duty", "/duty", "My duty")}
       {isAdmin && tab("admin", "/admin", "Admin")}
       {isAdmin && tab("war-payout", "/admin/war-payout", "War pay")}
       {tab("payouts", "/payouts", "Payouts")}

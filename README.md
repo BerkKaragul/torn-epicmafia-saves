@@ -139,6 +139,27 @@ npm run dev
 - **Key hygiene**: members can rotate their Torn key any time and just log in
   again; invalid keys auto-quarantine and end the member's shift.
 
+## Event mode (paid saving without a war)
+
+For stretches like the Halloween event, when the faction pays for saves but
+there's no ranked war to hang a war payout on. Admin → **Event mode**: name,
+end time (TCT) and a flat $ per save → **Start event now**.
+
+While it runs:
+- every shift open at the start ends; new shifts are stamped with the event
+- saving from **Torn City** counts: enlisting needs no travel check, flying home
+  doesn't end the shift, and hourly pay accrues at home too
+- `/duty` redirects to `/event` (enlist, siren, standings); the home page shows
+  a popup + banner pointing there; the whole site wears the Halloween theme
+- event shifts and saves are excluded from `war_report`, so nothing is paid twice
+
+At the end time (or **End event now**) the poller closes the event's shifts and
+everything returns to normal. On `/event` an admin then freezes the payout
+(hourly pay + saves × $ per save); it's published on `/payouts`.
+
+Deploy order: apply `0042_chain_events.sql` first, then restart the VPS poller,
+then deploy the site — the new poller and site read the new table/column.
+
 ## Repo map
 
 ```

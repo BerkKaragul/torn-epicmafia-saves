@@ -5,6 +5,7 @@ import { sessionMember, unauthorized } from "@/lib/session";
 import { tornClient } from "@/lib/torn";
 import { canEnlistFromStatus } from "@/supabase/functions/_shared/logic/travel";
 import { rotationOrder } from "@/supabase/functions/_shared/logic/rotation";
+import { runningEvent } from "@/lib/event";
 import type { ShiftRow } from "@/lib/types";
 
 // POST = start a duty shift, PATCH = stop the active one
@@ -21,25 +22,30 @@ export async function POST(req: Request) {
   // You can only enlist while you can actually go on to save: already abroad, or
   // flying OUT to another country. Not from Torn (nothing to save at home) and
   // not on the way back (you're done). Checked live against Torn with your key.
-  try {
-    if (!member.api_key_ct || !member.api_key_iv) throw new Error("no key on file");
-    const key = await decryptKey(member.api_key_ct, member.api_key_iv);
-    const profile = await tornClient(key).userBasic();
-    if (!canEnlistFromStatus(profile.status?.state ?? "Okay", profile.status?.description)) {
+  // During an event saving from Torn City counts too, so anywhere goes — the
+  // poller still pauses you while you're flying, in hospital or in jail.
+  const event = await runningEvent({ fresh: true });
+  if (!event) {
+    try {
+      if (!member.api_key_ct || !member.api_key_iv) throw new Error("no key on file");
+      const key = await decryptKey(member.api_key_ct, member.api_key_iv);
+      const profile = await tornClient(key).userBasic();
+      if (!canEnlistFromStatus(profile.status?.state ?? "Okay", profile.status?.description)) {
+        return NextResponse.json(
+          {
+            error:
+              "You can only go on duty while abroad or flying to another country — not from Torn or on the way back.",
+          },
+          { status: 409 },
+        );
+      }
+    } catch (e) {
+      console.error("enlist status check failed", e);
       return NextResponse.json(
-        {
-          error:
-            "You can only go on duty while abroad or flying to another country — not from Torn or on the way back.",
-        },
-        { status: 409 },
+        { error: "Couldn't check your travel status just now — try again in a moment." },
+        { status: 503 },
       );
     }
-  } catch (e) {
-    console.error("enlist status check failed", e);
-    return NextResponse.json(
-      { error: "Couldn't check your travel status just now — try again in a moment." },
-      { status: 503 },
-    );
   }
 
   let plannedMinutes: number | null = null;

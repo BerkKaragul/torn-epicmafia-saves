@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { sessionMember, unauthorized } from "@/lib/session";
 import { perSaverHourlyRate } from "@/supabase/functions/_shared/logic/pay";
+import { eventEnd, isEventRunning, latestEvent, type EventSummary } from "@/lib/event";
 import type { SaveRow, SettingsRow, ShiftRow } from "@/lib/types";
 
 interface WarTally {
@@ -38,6 +39,8 @@ async function currentWarTally(memberId: number): Promise<WarTally | null> {
       .from("shifts")
       .select("billable_seconds, earned_amount")
       .eq("member_id", memberId)
+      // event shifts are paid by their event, not the war
+      .is("event_id", null)
       .lt("started_at", to)
       .or(`ended_at.is.null,ended_at.gt.${from}`),
     db()
@@ -71,9 +74,73 @@ async function currentWarTally(memberId: number): Promise<WarTally | null> {
   };
 }
 
+interface EventTally {
+  id: number;
+  name: string;
+  started_at: string;
+  ends_at: string;
+  running: boolean;
+  save_bonus: number;
+  duty_seconds: number;
+  hours_amount: number;
+  save_count: number;
+  saves_amount: number;
+  missed_turns: number;
+}
+
+/**
+ * The member's tally for the newest event — chain pay from its own shifts,
+ * saves inside its window at its flat rate. Same rules as event_report.
+ */
+async function eventTally(memberId: number, event: EventSummary | null): Promise<EventTally | null> {
+  if (!event) return null;
+  const from = event.started_at;
+  const end = eventEnd(event);
+  const to = Date.parse(end) < Date.now() ? end : new Date().toISOString();
+  const [{ data: shifts }, { count: saves }, { count: missed }] = await Promise.all([
+    db()
+      .from("shifts")
+      .select("billable_seconds, earned_amount")
+      .eq("member_id", memberId)
+      .eq("event_id", event.id),
+    db()
+      .from("saves")
+      .select("id", { count: "exact", head: true })
+      .eq("member_id", memberId)
+      .eq("status", "confirmed")
+      .gte("detected_at", from)
+      .lte("detected_at", to),
+    db()
+      .from("missed_turns")
+      .select("id", { count: "exact", head: true })
+      .eq("member_id", memberId)
+      .gte("occurred_at", from)
+      .lte("occurred_at", to),
+  ]);
+  const saveBonus = Number(event.save_bonus) || 0;
+  return {
+    id: event.id,
+    name: event.name,
+    started_at: from,
+    ends_at: end,
+    running: isEventRunning(event),
+    save_bonus: saveBonus,
+    duty_seconds: (shifts ?? []).reduce((sum, s) => sum + Number(s.billable_seconds ?? 0), 0),
+    hours_amount: Math.round(
+      (shifts ?? []).reduce((sum, s) => sum + Number(s.earned_amount ?? 0), 0),
+    ),
+    save_count: saves ?? 0,
+    saves_amount: Math.round((saves ?? 0) * saveBonus),
+    missed_turns: missed ?? 0,
+  };
+}
+
 export async function GET() {
   const member = await sessionMember();
   if (!member) return unauthorized();
+
+  const latest = await latestEvent();
+  const running = latest && isEventRunning(latest) ? latest : null;
 
   const [
     { data: activeShift },
@@ -82,6 +149,7 @@ export async function GET() {
     { count: activeSavers },
     { count: eligibleSavers },
     { data: pollerState },
+    event,
   ] = await Promise.all([
       db()
         .from("shifts")
@@ -93,18 +161,20 @@ export async function GET() {
       currentWarTally(member.torn_id),
       db().from("shifts").select("id", { count: "exact", head: true }).is("ended_at", null),
       // savers actually earning right now: on duty, not blocked, and abroad
-      // (home-city time doesn't earn) — this drives the live per-saver split
+      // (home-city time doesn't earn, except on an event shift) — this drives
+      // the live per-saver split
       db()
         .from("shifts")
         .select("id", { count: "exact", head: true })
         .is("ended_at", null)
         .is("unavailable_state", null)
-        .eq("abroad", true),
+        .or(running ? `abroad.eq.true,event_id.eq.${running.id}` : "abroad.eq.true"),
       db()
         .from("poller_state")
         .select("last_chain_id, last_current, last_max, last_timeout_s, last_cooldown_s, last_poll_at")
         .eq("id", 1)
         .maybeSingle(),
+      eventTally(member.torn_id, latest),
     ]);
 
   const chainActive =
@@ -136,6 +206,7 @@ export async function GET() {
       : null,
     saving_enabled: settings?.saving_enabled ?? true,
     war,
+    event,
     chain_active: chainActive,
     chain: {
       id: pollerState?.last_chain_id ?? 0,

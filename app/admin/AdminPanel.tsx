@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { EventControl } from "./EventControl";
 
 interface Settings {
   saving_enabled: boolean;
@@ -152,6 +153,8 @@ export function AdminPanel() {
       )}
 
       {msg && <p className="text-sm text-amber-300">{msg}</p>}
+
+      <EventControl defaultSaveBonus={settings.per_save_bonus} onChange={load} />
 
       <section
         className={`rounded-xl border p-5 ${

@@ -40,6 +40,8 @@ interface ActiveShiftRow {
   travel_started_at: string | null;
   deprioritized_at: string | null;
   hourly_rate_snapshot: number | string;
+  /** The event this shift was started under (chain_events.id), null outside events. */
+  event_id: number | null;
   members: MemberKeyRow;
 }
 
@@ -163,11 +165,17 @@ export async function runPollCycle(): Promise<void> {
     const { data: activeShiftsRaw } = await db
       .from("shifts")
       .select(
-        `id, member_id, started_at, planned_minutes, last_save_at, unavailable_state, abroad, location, travel_dest, travel_started_at, deprioritized_at, hourly_rate_snapshot, members!inner(${MEMBER_KEY_COLS})`,
+        `id, member_id, started_at, planned_minutes, last_save_at, unavailable_state, abroad, location, travel_dest, travel_started_at, deprioritized_at, hourly_rate_snapshot, event_id, members!inner(${MEMBER_KEY_COLS})`,
       )
       .is("ended_at", null)
       .returns<ActiveShiftRow[]>();
     let activeShifts = activeShiftsRaw ?? [];
+
+    // ── event mode: the running event (if any), and close the shifts of one
+    // that has just ended so its pay stops exactly at the event's end ──────
+    const { data: activeEventId } = await db.rpc("active_event_id");
+    const eventId: number | null = activeEventId == null ? null : Number(activeEventId);
+    activeShifts = await closeEndedEventShifts(db, activeShifts, eventId);
 
     // ── resolve a key and observe the chain ──────────────────────────────
     const pollerMember = await pickPollerMember(db, settings.poller_member_id, activeShifts, nowS);
@@ -225,7 +233,7 @@ export async function runPollCycle(): Promise<void> {
 
     // who physically can't save right now (flying, hospital, jail) — must run
     // before rotation is used for alerts / save ownership
-    activeShifts = await syncAvailability(db, activeShifts, pollerTorn);
+    activeShifts = await syncAvailability(db, activeShifts, pollerTorn, eventId);
 
     // ── run the detector and persist its events ──────────────────────────
     const events = detect(prevObs, obs, {
@@ -309,7 +317,7 @@ export async function runPollCycle(): Promise<void> {
 
     // ── accrue availability pay for this slice of time ───────────────────
     const lastAccrualS = state.last_accrual_at ? toS(state.last_accrual_at) : nowS;
-    await accruePay(db, activeShifts, settings, obsActive, nowS, lastAccrualS);
+    await accruePay(db, activeShifts, settings, obsActive, nowS, lastAccrualS, eventId);
 
     // ── attribute pending saves via on-duty members' own attack logs ─────
     activeShifts = await attributePendingSaves(db, activeShifts, settings, nowS);
@@ -451,8 +459,9 @@ async function pickPollerMember(
  * Credits availability pay for the slice of time since the last accrual.
  *
  * Paid only while a chain is live, saving is enabled, and the saver can
- * actually attack. The per-saver rate depends on how many are eligible RIGHT
- * NOW (1-2 → full rate each, 3+ → a doubled pool split evenly), which is why
+ * actually attack. Normally that also means being abroad; during an event,
+ * saving from Torn City counts too. The per-saver rate depends on how many are
+ * eligible RIGHT NOW (1-2 → full rate each, 3+ → a doubled pool split evenly), which is why
  * this accrues continuously instead of being derived from the shift span.
  */
 async function accruePay(
@@ -462,14 +471,18 @@ async function accruePay(
   chainLive: boolean,
   nowS: number,
   lastAccrualS: number,
+  eventId: number | null,
 ): Promise<void> {
   // never credit a long poller outage as if it had been watched
   const elapsed = Math.min(Math.max(0, nowS - lastAccrualS), settings.poll_interval_s * 3);
   if (elapsed <= 0 || !chainLive || !settings.saving_enabled) return;
 
   // pay only savers who are on-station: not blocked (travel/hospital/…) AND
-  // actually abroad, where saving happens. Home-city time earns nothing.
-  const eligible = activeShifts.filter((s) => !s.unavailable_state && s.abroad);
+  // actually abroad, where saving happens. Home-city time earns nothing —
+  // except on an event shift, where Torn City saves count as well.
+  const eligible = activeShifts.filter(
+    (s) => !s.unavailable_state && (s.abroad || (eventId != null && s.event_id === eventId)),
+  );
   if (eligible.length === 0) return;
 
   const rows = eligible
@@ -679,6 +692,46 @@ async function handleChainDropped(
     });
   }
   return [];
+}
+
+/**
+ * An event's shifts belong to that event's payout, so once it's over (its end
+ * time passed, or an admin ended it) they close — nothing accrues past the end.
+ * Members re-enlist under the normal rules if they want to keep saving.
+ */
+async function closeEndedEventShifts(
+  db: SupabaseClient,
+  activeShifts: ActiveShiftRow[],
+  eventId: number | null,
+): Promise<ActiveShiftRow[]> {
+  const stale = activeShifts.filter((s) => s.event_id != null && s.event_id !== eventId);
+  if (stale.length === 0) return activeShifts;
+  const { data: events } = await db
+    .from("chain_events")
+    .select("id, ends_at, ended_at")
+    .in("id", [...new Set(stale.map((s) => s.event_id!))]);
+  const endOf = new Map(
+    (events ?? []).map((e) => [Number(e.id), (e.ended_at ?? e.ends_at) as string]),
+  );
+  for (const shift of stale) {
+    await db
+      .from("shifts")
+      .update({
+        ended_at: endOf.get(shift.event_id!) ?? new Date().toISOString(),
+        end_reason: "event_ended",
+      })
+      .eq("id", shift.id)
+      .is("ended_at", null);
+    await dispatch(db, [shift.member_id], {
+      type: "shift_end",
+      title: "🎃 Event over — duty ended",
+      body: "The event has ended, so your saver shift closed. Thanks for saving!",
+      url: "/event",
+      dedupKey: `event_ended:${shift.id}`,
+    });
+  }
+  const closed = new Set(stale.map((s) => s.id));
+  return activeShifts.filter((s) => !closed.has(s.id));
 }
 
 async function housekeepShifts(
@@ -989,6 +1042,7 @@ async function syncAvailability(
   db: SupabaseClient,
   activeShifts: ActiveShiftRow[],
   torn: TornClient,
+  eventId: number | null,
 ): Promise<ActiveShiftRow[]> {
   if (activeShifts.length === 0) return activeShifts;
   let roster;
@@ -1025,7 +1079,9 @@ async function syncAvailability(
 
     // Heading home to Torn = done saving for this trip: end the shift now so the
     // slot frees up immediately (4/4 -> 3/4) instead of lingering as "can't save".
-    if (traveling && travelDest === "Torn") {
+    // Not on an event shift: during an event you can keep saving from Torn.
+    const eventShift = eventId != null && shift.event_id === eventId;
+    if (traveling && travelDest === "Torn" && !eventShift) {
       await db
         .from("shifts")
         .update({ ended_at: nowIso, end_reason: "returning_home" })

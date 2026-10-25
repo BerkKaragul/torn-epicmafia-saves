@@ -87,6 +87,95 @@ html.light {
   --color-sky-950: #e0f2fe;
 }
 
+/* ── event theme: Halloween ───────────────────────────────────────────────
+   Put on <html> by the server while a Halloween event runs (see layout.tsx);
+   the light class is never added alongside it. Same trick as light mode: the
+   palette variables are re-pointed, so every page dresses up without a single
+   component knowing. The classic four colours keep their meanings —
+     neutral → night purple (structure), emerald → slime green (money / OK),
+     amber → pumpkin orange (warnings), red stays red (danger). */
+html.halloween {
+  color-scheme: dark;
+
+  --color-neutral-50: #fbf7ff;
+  --color-neutral-100: #f3ecfb;
+  --color-neutral-200: #e4d8f0;
+  --color-neutral-300: #cdbde0;
+  --color-neutral-400: #a693bd;
+  --color-neutral-500: #85739e;
+  --color-neutral-600: #66567e;
+  --color-neutral-700: #3f2f57;
+  --color-neutral-800: #2b1f40;
+  --color-neutral-900: #1a1229;
+  --color-neutral-950: #0e0917;
+
+  --color-emerald-200: #d9f99d;
+  --color-emerald-300: #bef264;
+  --color-emerald-400: #a3e635;
+  --color-emerald-500: #5f9512;
+  --color-emerald-600: #4d7c0f;
+  --color-emerald-700: #3f6212;
+  --color-emerald-800: #365314;
+  --color-emerald-900: #1f300a;
+  --color-emerald-950: #121c05;
+
+  --color-amber-300: #fdba74;
+  --color-amber-400: #fb923c;
+  --color-amber-600: #ea580c;
+  --color-amber-700: #c2410c;
+  --color-amber-800: #9a3412;
+  --color-amber-900: #431407;
+  --color-amber-950: #2a0c03;
+}
+
+html.halloween body {
+  /* a pumpkin glow over the horizon and a cold moon in the corner */
+  background-image:
+    radial-gradient(ellipse 90% 45% at 50% 100%, rgba(234, 88, 12, 0.16), transparent 70%),
+    radial-gradient(circle at 88% 6%, rgba(233, 213, 255, 0.1), transparent 22%);
+  background-attachment: fixed;
+}
+
+/* drifting bats / ghosts behind the content (HalloweenDecor.tsx) */
+@keyframes cwDrift {
+  0% {
+    transform: translate(0, 0) rotate(var(--cw-rot, 0deg));
+  }
+  50% {
+    transform: translate(var(--cw-dx, 24px), -18px) rotate(calc(var(--cw-rot, 0deg) * -1));
+  }
+  100% {
+    transform: translate(0, 0) rotate(var(--cw-rot, 0deg));
+  }
+}
+@keyframes cwFlicker {
+  0%,
+  100% {
+    opacity: 1;
+    text-shadow: 0 0 18px rgba(251, 146, 60, 0.75);
+  }
+  45% {
+    opacity: 0.86;
+    text-shadow: 0 0 8px rgba(251, 146, 60, 0.4);
+  }
+  55% {
+    opacity: 1;
+    text-shadow: 0 0 24px rgba(251, 146, 60, 0.9);
+  }
+}
+.cw-drift {
+  animation: cwDrift var(--cw-dur, 9s) ease-in-out var(--cw-delay, 0s) infinite;
+}
+.cw-flicker {
+  animation: cwFlicker 3.2s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .cw-drift,
+  .cw-flicker {
+    animation: none !important;
+  }
+}
+
 html,
 body {
   height: 100%;

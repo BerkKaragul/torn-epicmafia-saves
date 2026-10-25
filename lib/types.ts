@@ -47,6 +47,8 @@ export interface ShiftRow {
     | "chain_dropped"
     | "saving_disabled"
     | "returning_home"
+    | "event_started"
+    | "event_ended"
     | null;
   hourly_rate_snapshot: number;
   last_save_at: string | null;
@@ -60,6 +62,8 @@ export interface ShiftRow {
   travel_started_at: string | null;
   /** Set when the saver taps "skip my turn" — pushes them to the back. */
   deprioritized_at: string | null;
+  /** The event this shift was started under (chain_events.id); null outside events. */
+  event_id: number | null;
   payout_line_id: string | null;
 }
 
@@ -110,6 +114,43 @@ export interface WarPayoutSnapshotRow {
   lines: unknown;
   saved_by: number;
   saved_at: string;
+}
+
+/** One member's line of an event payout (event_report + the frozen snapshot). */
+export interface EventPayoutLine {
+  member_id: number;
+  name: string;
+  save_seconds: number;
+  chain_pay: number;
+  saves: number;
+  saves_pay: number;
+  missed_turns: number;
+  total: number;
+}
+
+export interface EventPayoutTotals {
+  chain: number;
+  saves: number;
+  saves_pay: number;
+  grand: number;
+  members: number;
+  save_bonus: number;
+}
+
+/** A time-boxed paid-saving event with no ranked war (see migration 0042). */
+export interface ChainEventRow {
+  id: number;
+  name: string;
+  theme: string;
+  started_at: string;
+  ends_at: string;
+  ended_at: string | null;
+  save_bonus: number;
+  created_by: number | null;
+  payout_lines: EventPayoutLine[] | null;
+  payout_totals: EventPayoutTotals | null;
+  payout_saved_by: number | null;
+  payout_saved_at: string | null;
 }
 
 // The two rows below back the retired period-sweep payout system (0032 dropped

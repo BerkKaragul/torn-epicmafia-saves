@@ -11,7 +11,8 @@
 import { runPollCycle } from "../supabase/functions/poller/cycle.ts";
 
 const POLL_MS = 10_000;
-const PORT = 3100;
+// on the shared "web" machine projects live in their own port range
+const PORT = Number(Deno.env.get("PORT") ?? 3100);
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
 // ── poke fan-out (SSE) ────────────────────────────────────────────────────

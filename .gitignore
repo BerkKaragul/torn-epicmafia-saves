@@ -28,3 +28,6 @@ supabase/.branches/
 
 # local reference / not part of the app
 customone.txt
+
+# claude-vault
+.claude/settings.local.json

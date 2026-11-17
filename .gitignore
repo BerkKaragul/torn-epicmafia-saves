@@ -29,5 +29,7 @@ supabase/.branches/
 # local reference / not part of the app
 customone.txt
 
-# claude-vault
-.claude/settings.local.json
+# claude-vault (ajan dosyaları: sunucu IP'si ve servis yolları içerir, public repoya girmez)
+.claude/
+CLAUDE.md
+docs/STATE.md

@@ -33,3 +33,5 @@ customone.txt
 .claude/
 CLAUDE.md
 docs/STATE.md
+docs/DECISIONS.md
+docs/STATE_ARCHIVE.md
